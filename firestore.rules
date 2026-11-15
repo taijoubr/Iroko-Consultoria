@@ -1,0 +1,639 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'p.nikolas3@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin()
+        || (isSignedIn()
+          && request.auth.token.email_verified == true
+          && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isValidStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // Entity Validators
+    function isValidAppSettings(data) {
+      return data.keys().hasAll([
+          'ownerId', 'boletoSurchargePercent', 'boletoInstallment1Days', 'boletoInstallment2Days',
+          'refMonthlyInterestRate', 'refAnnualInterestRate', 'refMonthlyCet', 'refAnnualCet',
+          'refIofAmount', 'sellerName', 'sellerDocument', 'sellerPhone', 'sellerEmail',
+          'sellerAddress', 'receiptHeader', 'receiptFooter', 'allowNegativeStock',
+          'categories', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'boletoSurchargePercent', 'boletoInstallment1Days', 'boletoInstallment2Days',
+          'refMonthlyInterestRate', 'refAnnualInterestRate', 'refMonthlyCet', 'refAnnualCet',
+          'refIofAmount', 'sellerName', 'sellerDocument', 'sellerPhone', 'sellerEmail',
+          'sellerAddress', 'receiptHeader', 'receiptFooter', 'allowNegativeStock',
+          'categories', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.boletoSurchargePercent is number && data.boletoSurchargePercent >= 0 && data.boletoSurchargePercent <= 100
+        && data.boletoInstallment1Days is number && data.boletoInstallment1Days >= 1 && data.boletoInstallment1Days <= 365
+        && data.boletoInstallment2Days is number && data.boletoInstallment2Days >= 1 && data.boletoInstallment2Days <= 365
+        && data.refMonthlyInterestRate is number && data.refMonthlyInterestRate >= 0
+        && data.refAnnualInterestRate is number && data.refAnnualInterestRate >= 0
+        && data.refMonthlyCet is number && data.refMonthlyCet >= 0
+        && data.refAnnualCet is number && data.refAnnualCet >= 0
+        && data.refIofAmount is number && data.refIofAmount >= 0
+        && isValidStr(data.sellerName, 0, 120)
+        && isValidStr(data.sellerDocument, 0, 32)
+        && isValidStr(data.sellerPhone, 0, 32)
+        && isValidStr(data.sellerEmail, 0, 120)
+        && isValidStr(data.sellerAddress, 0, 240)
+        && isValidStr(data.receiptHeader, 0, 240)
+        && isValidStr(data.receiptFooter, 0, 240)
+        && data.allowNegativeStock is bool
+        && data.categories is list && data.categories.size() <= 40
+        && (data.categories.size() == 0 || data.categories[0] is string)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSettingsHistory(data) {
+      return data.keys().hasAll(['ownerId', 'changedAt', 'summary', 'previousValues', 'newValues', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'changedAt', 'summary', 'previousValues', 'newValues', 'createdAt'])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidStr(data.changedAt, 1, 40)
+        && isValidStr(data.summary, 1, 500)
+        && data.previousValues is map
+        && data.newValues is map
+        && data.createdAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll([
+          'ownerId', 'name', 'code', 'brand', 'category',
+          'availableQty', 'reservedQty', 'deliveredQty', 'personalConsumedQty',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'name', 'code', 'brand', 'category',
+          'availableQty', 'reservedQty', 'deliveredQty', 'personalConsumedQty',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidStr(data.name, 1, 160)
+        && isValidStr(data.code, 0, 64)
+        && data.brand in ['Avon', 'Natura']
+        && isValidStr(data.category, 0, 80)
+        && data.availableQty is number
+        && data.reservedQty is number && data.reservedQty >= 0
+        && data.deliveredQty is number && data.deliveredQty >= 0
+        && data.personalConsumedQty is number && data.personalConsumedQty >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStockLot(data) {
+      return data.keys().hasAll([
+          'ownerId', 'productId', 'productName', 'productCode', 'brand',
+          'purchaseId', 'purchaseOrderNumber', 'purchaseDate',
+          'initialQty', 'availableQty', 'reservedQty', 'deliveredQty', 'consumedQty',
+          'unitBaseCost', 'unitFinancialCost', 'unitEffectiveCost', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'productId', 'productName', 'productCode', 'brand',
+          'purchaseId', 'purchaseOrderNumber', 'purchaseDate',
+          'initialQty', 'availableQty', 'reservedQty', 'deliveredQty', 'consumedQty',
+          'unitBaseCost', 'unitFinancialCost', 'unitEffectiveCost', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.productId)
+        && isValidStr(data.productName, 1, 160)
+        && isValidStr(data.productCode, 0, 64)
+        && data.brand in ['Avon', 'Natura']
+        && isValidId(data.purchaseId)
+        && isValidStr(data.purchaseOrderNumber, 0, 64)
+        && isValidStr(data.purchaseDate, 1, 20)
+        && data.initialQty is number && data.initialQty >= 0
+        && data.availableQty is number
+        && data.reservedQty is number && data.reservedQty >= 0
+        && data.deliveredQty is number && data.deliveredQty >= 0
+        && data.consumedQty is number && data.consumedQty >= 0
+        && data.unitBaseCost is number && data.unitBaseCost >= 0
+        && data.unitFinancialCost is number && data.unitFinancialCost >= 0
+        && data.unitEffectiveCost is number && data.unitEffectiveCost >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStockMovement(data) {
+      return data.keys().hasAll([
+          'ownerId', 'productId', 'productName', 'brand', 'lotId', 'type',
+          'quantity', 'unitBaseCost', 'unitFinancialCost', 'unitEffectiveCost',
+          'totalEffectiveCost', 'referenceType', 'referenceId', 'date', 'notes', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'productId', 'productName', 'brand', 'lotId', 'type',
+          'quantity', 'unitBaseCost', 'unitFinancialCost', 'unitEffectiveCost',
+          'totalEffectiveCost', 'referenceType', 'referenceId', 'date', 'notes', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.productId)
+        && isValidStr(data.productName, 1, 160)
+        && data.brand in ['Avon', 'Natura']
+        && isValidStr(data.lotId, 0, 128)
+        && data.type in ['ENTRADA_COMPRA', 'RESERVA_CLIENTE', 'LIBERACAO_RESERVA', 'SAIDA_VENDA', 'CONSUMO_PROPRIO', 'AJUSTE']
+        && data.quantity is number && data.quantity > 0
+        && data.unitBaseCost is number && data.unitBaseCost >= 0
+        && data.unitFinancialCost is number && data.unitFinancialCost >= 0
+        && data.unitEffectiveCost is number && data.unitEffectiveCost >= 0
+        && data.totalEffectiveCost is number && data.totalEffectiveCost >= 0
+        && data.referenceType in ['purchase', 'sale', 'consumption', 'manual']
+        && isValidStr(data.referenceId, 0, 128)
+        && isValidStr(data.date, 1, 20)
+        && isValidStr(data.notes, 0, 300)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidPurchase(data) {
+      return data.keys().hasAll([
+          'ownerId', 'brand', 'orderNumber', 'purchaseDate', 'billingDate', 'referenceDate',
+          'paymentMethod', 'originalTotal', 'surchargePercentApplied', 'surchargeAmount',
+          'effectiveTotal', 'financialParamsSnapshot', 'itemsCount', 'items', 'notes',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'brand', 'orderNumber', 'purchaseDate', 'billingDate', 'referenceDate',
+          'paymentMethod', 'originalTotal', 'surchargePercentApplied', 'surchargeAmount',
+          'effectiveTotal', 'financialParamsSnapshot', 'itemsCount', 'items', 'notes',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.brand in ['Avon', 'Natura', 'Mista']
+        && isValidStr(data.orderNumber, 1, 64)
+        && isValidStr(data.purchaseDate, 1, 20)
+        && isValidStr(data.billingDate, 0, 20)
+        && isValidStr(data.referenceDate, 1, 20)
+        && data.paymentMethod in ['A_VISTA', 'BOLETO_2X']
+        && data.originalTotal is number && data.originalTotal >= 0
+        && data.surchargePercentApplied is number && data.surchargePercentApplied >= 0
+        && data.surchargeAmount is number && data.surchargeAmount >= 0
+        && data.effectiveTotal is number && data.effectiveTotal >= 0
+        && data.financialParamsSnapshot is map
+        && data.itemsCount is number && data.itemsCount >= 1 && data.itemsCount <= 100
+        && data.items is list && data.items.size() >= 1 && data.items.size() <= 100
+        && data.items[0] is map
+        && isValidStr(data.notes, 0, 400)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPayable(data) {
+      return data.keys().hasAll([
+          'ownerId', 'type', 'purchaseId', 'orderNumber', 'description',
+          'installmentNumber', 'totalInstallments', 'dueDate', 'originalAmount',
+          'interestAmount', 'totalAmount', 'paidAmount', 'status', 'paidDate',
+          'category', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'type', 'purchaseId', 'orderNumber', 'description',
+          'installmentNumber', 'totalInstallments', 'dueDate', 'originalAmount',
+          'interestAmount', 'totalAmount', 'paidAmount', 'status', 'paidDate',
+          'category', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.type in ['BOLETO_AVON', 'BOLETO_NATURA', 'BOLETO_MISTO', 'DESPESA']
+        && isValidStr(data.purchaseId, 0, 128)
+        && isValidStr(data.orderNumber, 0, 64)
+        && isValidStr(data.description, 1, 200)
+        && data.installmentNumber is number && data.installmentNumber >= 1
+        && data.totalInstallments is number && data.totalInstallments >= 1
+        && isValidStr(data.dueDate, 1, 20)
+        && data.originalAmount is number && data.originalAmount >= 0
+        && data.interestAmount is number && data.interestAmount >= 0
+        && data.totalAmount is number && data.totalAmount >= 0
+        && data.paidAmount is number && data.paidAmount >= 0
+        && data.status in ['PENDENTE', 'PARCIAL', 'PAGO']
+        && isValidStr(data.paidDate, 0, 20)
+        && isValidStr(data.category, 0, 80)
+        && isValidStr(data.notes, 0, 300)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidClient(data) {
+      return data.keys().hasAll([
+          'ownerId', 'fullName', 'phone', 'whatsapp', 'address', 'registeredAt', 'notes',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'fullName', 'phone', 'whatsapp', 'address', 'registeredAt', 'notes',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidStr(data.fullName, 1, 140)
+        && isValidStr(data.phone, 0, 32)
+        && isValidStr(data.whatsapp, 0, 32)
+        && isValidStr(data.address, 0, 240)
+        && isValidStr(data.registeredAt, 1, 20)
+        && isValidStr(data.notes, 0, 500)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSale(data) {
+      return data.keys().hasAll([
+          'ownerId', 'documentNumber', 'clientId', 'clientName', 'saleDate', 'items',
+          'originalSaleAmount', 'totalProductCost', 'totalBaseCost', 'totalFinancialCost',
+          'hasOwnCredit', 'ownCreditAmount', 'ownCreditInterestPercent', 'ownCreditInterestAmount',
+          'ownCreditTotalDue', 'ownCreditInstallmentsCount', 'totalWithInterest',
+          'grossProfitOnProducts', 'paymentSplits', 'paidAmount', 'pendingAmount',
+          'paymentStatus', 'deliveryStatus', 'deliveryDate', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'documentNumber', 'clientId', 'clientName', 'saleDate', 'items',
+          'originalSaleAmount', 'totalProductCost', 'totalBaseCost', 'totalFinancialCost',
+          'hasOwnCredit', 'ownCreditAmount', 'ownCreditInterestPercent', 'ownCreditInterestAmount',
+          'ownCreditTotalDue', 'ownCreditInstallmentsCount', 'totalWithInterest',
+          'grossProfitOnProducts', 'paymentSplits', 'paidAmount', 'pendingAmount',
+          'paymentStatus', 'deliveryStatus', 'deliveryDate', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidStr(data.documentNumber, 1, 40)
+        && isValidId(data.clientId)
+        && isValidStr(data.clientName, 1, 140)
+        && isValidStr(data.saleDate, 1, 20)
+        && data.items is list && data.items.size() >= 1 && data.items.size() <= 100
+        && data.items[0] is map
+        && data.originalSaleAmount is number && data.originalSaleAmount >= 0
+        && data.totalProductCost is number && data.totalProductCost >= 0
+        && data.totalBaseCost is number && data.totalBaseCost >= 0
+        && data.totalFinancialCost is number && data.totalFinancialCost >= 0
+        && data.hasOwnCredit is bool
+        && data.ownCreditAmount is number && data.ownCreditAmount >= 0
+        && data.ownCreditInterestPercent is number && data.ownCreditInterestPercent >= 0
+        && data.ownCreditInterestAmount is number && data.ownCreditInterestAmount >= 0
+        && data.ownCreditTotalDue is number && data.ownCreditTotalDue >= 0
+        && data.ownCreditInstallmentsCount is number && data.ownCreditInstallmentsCount >= 0
+        && data.totalWithInterest is number && data.totalWithInterest >= 0
+        && data.grossProfitOnProducts is number
+        && data.paymentSplits is list && data.paymentSplits.size() >= 1 && data.paymentSplits.size() <= 10
+        && data.paymentSplits[0] is map
+        && data.paidAmount is number && data.paidAmount >= 0
+        && data.pendingAmount is number && data.pendingAmount >= 0
+        && data.paymentStatus in ['PAGO', 'PARCIAL', 'PENDENTE']
+        && data.deliveryStatus in ['ENTREGUE', 'PENDENTE', 'RESERVADO']
+        && isValidStr(data.deliveryDate, 0, 20)
+        && isValidStr(data.notes, 0, 500)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidReceivable(data) {
+      return data.keys().hasAll([
+          'ownerId', 'saleId', 'documentNumber', 'clientId', 'clientName', 'type',
+          'installmentNumber', 'totalInstallments', 'dueDate', 'principalAmount',
+          'interestAmount', 'totalAmount', 'paidAmount', 'status', 'dueDateHistory',
+          'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'saleId', 'documentNumber', 'clientId', 'clientName', 'type',
+          'installmentNumber', 'totalInstallments', 'dueDate', 'principalAmount',
+          'interestAmount', 'totalAmount', 'paidAmount', 'status', 'dueDateHistory',
+          'notes', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.saleId)
+        && isValidStr(data.documentNumber, 0, 40)
+        && isValidId(data.clientId)
+        && isValidStr(data.clientName, 1, 140)
+        && data.type in ['CREDITO_PROPRIO', 'SALDO_VENDA']
+        && data.installmentNumber is number && data.installmentNumber >= 1
+        && data.totalInstallments is number && data.totalInstallments >= 1
+        && isValidStr(data.dueDate, 1, 20)
+        && data.principalAmount is number && data.principalAmount >= 0
+        && data.interestAmount is number && data.interestAmount >= 0
+        && data.totalAmount is number && data.totalAmount >= 0
+        && data.paidAmount is number && data.paidAmount >= 0
+        && data.status in ['PENDENTE', 'PARCIAL', 'PAGO']
+        && data.dueDateHistory is list && data.dueDateHistory.size() <= 30
+        && (data.dueDateHistory.size() == 0 || data.dueDateHistory[0] is map)
+        && isValidStr(data.notes, 0, 300)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPayment(data) {
+      return data.keys().hasAll([
+          'ownerId', 'receiptNumber', 'saleId', 'receivableId', 'clientId', 'clientName',
+          'paymentDate', 'method', 'amount', 'principalPortion', 'interestPortion',
+          'installmentNumber', 'totalInstallments', 'notes', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'receiptNumber', 'saleId', 'receivableId', 'clientId', 'clientName',
+          'paymentDate', 'method', 'amount', 'principalPortion', 'interestPortion',
+          'installmentNumber', 'totalInstallments', 'notes', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidStr(data.receiptNumber, 1, 40)
+        && isValidId(data.saleId)
+        && isValidStr(data.receivableId, 0, 128)
+        && isValidId(data.clientId)
+        && isValidStr(data.clientName, 1, 140)
+        && isValidStr(data.paymentDate, 1, 20)
+        && data.method in ['DINHEIRO', 'PIX', 'DEBITO', 'CREDITO', 'CREDITO_PROPRIO']
+        && data.amount is number && data.amount > 0
+        && data.principalPortion is number && data.principalPortion >= 0
+        && data.interestPortion is number && data.interestPortion >= 0
+        && data.installmentNumber is number && data.installmentNumber >= 0
+        && data.totalInstallments is number && data.totalInstallments >= 0
+        && isValidStr(data.notes, 0, 300)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidCardSettlement(data) {
+      return data.keys().hasAll([
+          'ownerId', 'saleId', 'saleDocumentNumber', 'clientName', 'saleDate',
+          'cardMethod', 'installments', 'grossCardAmount', 'status', 'settlementDate',
+          'netDepositedAmount', 'feeAmount', 'operatorName', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'saleId', 'saleDocumentNumber', 'clientName', 'saleDate',
+          'cardMethod', 'installments', 'grossCardAmount', 'status', 'settlementDate',
+          'netDepositedAmount', 'feeAmount', 'operatorName', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.saleId)
+        && isValidStr(data.saleDocumentNumber, 0, 40)
+        && isValidStr(data.clientName, 0, 140)
+        && isValidStr(data.saleDate, 1, 20)
+        && data.cardMethod in ['DEBITO', 'CREDITO']
+        && data.installments is number && data.installments >= 1
+        && data.grossCardAmount is number && data.grossCardAmount > 0
+        && data.status in ['AGUARDANDO', 'RECEBIDO']
+        && isValidStr(data.settlementDate, 0, 20)
+        && data.netDepositedAmount is number && data.netDepositedAmount >= 0
+        && data.feeAmount is number && data.feeAmount >= 0
+        && isValidStr(data.operatorName, 0, 80)
+        && isValidStr(data.notes, 0, 300)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPersonalConsumption(data) {
+      return data.keys().hasAll([
+          'ownerId', 'date', 'productId', 'productName', 'productCode', 'brand',
+          'quantity', 'unitEffectiveCost', 'totalCost', 'lotAllocations', 'notes', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'date', 'productId', 'productName', 'productCode', 'brand',
+          'quantity', 'unitEffectiveCost', 'totalCost', 'lotAllocations', 'notes', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidStr(data.date, 1, 20)
+        && isValidId(data.productId)
+        && isValidStr(data.productName, 1, 160)
+        && isValidStr(data.productCode, 0, 64)
+        && data.brand in ['Avon', 'Natura']
+        && data.quantity is number && data.quantity > 0
+        && data.unitEffectiveCost is number && data.unitEffectiveCost >= 0
+        && data.totalCost is number && data.totalCost >= 0
+        && data.lotAllocations is list && data.lotAllocations.size() <= 50
+        && (data.lotAllocations.size() == 0 || data.lotAllocations[0] is map)
+        && isValidStr(data.notes, 0, 300)
+        && data.createdAt is timestamp;
+    }
+
+    // Connection check path
+    match /test/{docId} {
+      allow get: if isSignedIn() && isValidId(docId);
+    }
+
+    // Admin registry
+    match /admins/{adminUid} {
+      allow get: if isBootstrappedAdmin() && isValidId(adminUid);
+      allow list: if false;
+      allow write: if isBootstrappedAdmin() && isValidId(adminUid);
+    }
+
+    // Application Collections
+    match /settings/{settingId} {
+      allow get: if isAdmin() && isValidId(settingId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(settingId) && isValidAppSettings(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(settingId) && isValidAppSettings(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'boletoSurchargePercent', 'boletoInstallment1Days', 'boletoInstallment2Days',
+          'refMonthlyInterestRate', 'refAnnualInterestRate', 'refMonthlyCet', 'refAnnualCet',
+          'refIofAmount', 'sellerName', 'sellerDocument', 'sellerPhone', 'sellerEmail',
+          'sellerAddress', 'receiptHeader', 'receiptFooter', 'allowNegativeStock',
+          'categories', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /settingsHistory/{historyId} {
+      allow get: if isAdmin() && isValidId(historyId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(historyId) && isValidSettingsHistory(incoming())
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /products/{productId} {
+      allow get: if isAdmin() && isValidId(productId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(productId) && isValidProduct(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(productId) && isValidProduct(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'code', 'brand', 'category', 'availableQty', 'reservedQty',
+            'deliveredQty', 'personalConsumedQty', 'updatedAt'
+          ])
+        );
+      allow delete: if isAdmin() && isValidId(productId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /stockLots/{lotId} {
+      allow get: if isAdmin() && isValidId(lotId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(lotId) && isValidStockLot(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/purchases/$(incoming().purchaseId))
+        && existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+      allow update: if isAdmin() && isValidId(lotId) && isValidStockLot(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'availableQty', 'reservedQty', 'deliveredQty', 'consumedQty', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /stockMovements/{movementId} {
+      allow get: if isAdmin() && isValidId(movementId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(movementId) && isValidStockMovement(incoming())
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /purchases/{purchaseId} {
+      allow get: if isAdmin() && isValidId(purchaseId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(purchaseId) && isValidPurchase(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(purchaseId) && isValidPurchase(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['billingDate', 'notes', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /payables/{payableId} {
+      allow get: if isAdmin() && isValidId(payableId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(payableId) && isValidPayable(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time
+        && (incoming().purchaseId == '' || existsAfter(/databases/$(database)/documents/purchases/$(incoming().purchaseId)));
+      allow update: if isAdmin() && isValidId(payableId) && isValidPayable(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'paidAmount', 'status', 'paidDate', 'dueDate', 'notes', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(payableId) && existing().ownerId == request.auth.uid
+        && existing().type == 'DESPESA';
+    }
+
+    match /clients/{clientId} {
+      allow get: if isAdmin() && isValidId(clientId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(clientId) && isValidClient(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(clientId) && isValidClient(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'fullName', 'phone', 'whatsapp', 'address', 'notes', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(clientId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /sales/{saleId} {
+      allow get: if isAdmin() && isValidId(saleId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(saleId) && isValidSale(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/clients/$(incoming().clientId));
+      allow update: if isAdmin() && isValidId(saleId) && isValidSale(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'pendingAmount', 'paymentStatus', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['deliveryStatus', 'deliveryDate', 'notes', 'updatedAt'])
+        );
+      allow delete: if false;
+    }
+
+    match /receivables/{receivableId} {
+      allow get: if isAdmin() && isValidId(receivableId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(receivableId) && isValidReceivable(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/sales/$(incoming().saleId));
+      allow update: if isAdmin() && isValidId(receivableId) && isValidReceivable(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['dueDate', 'dueDateHistory', 'notes', 'updatedAt'])
+        );
+      allow delete: if false;
+    }
+
+    match /payments/{paymentId} {
+      allow get: if isAdmin() && isValidId(paymentId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(paymentId) && isValidPayment(incoming())
+        && incoming().createdAt == request.time
+        && existsAfter(/databases/$(database)/documents/sales/$(incoming().saleId))
+        && (incoming().receivableId == '' || existsAfter(/databases/$(database)/documents/receivables/$(incoming().receivableId)));
+      allow update, delete: if false;
+    }
+
+    match /cardSettlements/{settlementId} {
+      allow get: if isAdmin() && isValidId(settlementId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(settlementId) && isValidCardSettlement(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/sales/$(incoming().saleId));
+      allow update: if isAdmin() && isValidId(settlementId) && isValidCardSettlement(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'settlementDate', 'netDepositedAmount', 'feeAmount', 'operatorName', 'notes', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /personalConsumptions/{consumptionId} {
+      allow get: if isAdmin() && isValidId(consumptionId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(consumptionId) && isValidPersonalConsumption(incoming())
+        && incoming().createdAt == request.time
+        && existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+      allow update, delete: if false;
+    }
+  }
+}
