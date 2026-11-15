@@ -1,7 +1,12 @@
 import React, { useMemo, useState } from 'react';
 import { Coffee, Minus, Plus, ShoppingBasket, Trash2 } from 'lucide-react';
+import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
-import { registerPersonalConsumptionBatch } from '../services/firestoreOperations';
+import {
+  deletePersonalConsumption,
+  registerPersonalConsumptionBatch,
+} from '../services/firestoreOperations';
+import type { PersonalConsumption } from '../types';
 import { allocateFifoFromLots } from '../utils/finance';
 import { formatCurrency, formatDateBR, getTodayISO, round2 } from '../utils/formatters';
 
@@ -11,7 +16,8 @@ interface DraftConsumptionItem {
 }
 
 export function PersonalConsumptionPage() {
-  const { user, settings, products, stockLots, personalConsumptions } = useAppData();
+  const { user, settings, products, stockLots, stockMovements, personalConsumptions } =
+    useAppData();
 
   const [productId, setProductId] = useState('');
   const [quantity, setQuantity] = useState(1);
@@ -21,6 +27,9 @@ export function PersonalConsumptionPage() {
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<PersonalConsumption | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const selectedProduct = useMemo(
     () => products.find((p) => p.id === productId) || null,
@@ -234,6 +243,23 @@ export function PersonalConsumptionPage() {
   const canSubmit =
     !submitting &&
     (draftList.length > 0 ? !listEvaluation.firstError : Boolean(selectedProduct && !pickerPreview.error));
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteError(null);
+    setDeleting(true);
+    try {
+      await deletePersonalConsumption(deleteTarget, products, stockLots, stockMovements);
+      setSuccessMsg(
+        `Retirada de ${deleteTarget.quantity}x "${deleteTarget.productName}" estornada para o estoque.`
+      );
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Erro ao excluir retirada.');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -528,11 +554,25 @@ export function PersonalConsumptionPage() {
                             {formatDateBR(c.date)} · {c.brand}
                           </p>
                         </div>
-                        <div className="text-right">
-                          <p className="font-mono-num text-xs font-semibold text-zinc-100">
-                            {formatCurrency(c.totalCost)}
-                          </p>
-                          <p className="font-mono-num text-[11px] text-zinc-400">{c.quantity} un.</p>
+                        <div className="flex items-center gap-2">
+                          <div className="text-right">
+                            <p className="font-mono-num text-xs font-semibold text-zinc-100">
+                              {formatCurrency(c.totalCost)}
+                            </p>
+                            <p className="font-mono-num text-[11px] text-zinc-400">{c.quantity} un.</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeleteError(null);
+                              setDeleteTarget(c);
+                            }}
+                            aria-label="Excluir retirada"
+                            title="Estornar retirada"
+                            className="rounded-lg border border-zinc-700 bg-zinc-950/60 p-1.5 text-zinc-400 hover:border-red-900/60 hover:bg-red-950/40 hover:text-red-400"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
                         </div>
                       </div>
                       {c.notes && <p className="text-[11px] text-zinc-400">{c.notes}</p>}
@@ -550,6 +590,7 @@ export function PersonalConsumptionPage() {
                         <th className="px-4 py-3 text-right font-medium">Qtd.</th>
                         <th className="px-4 py-3 text-right font-medium">Custo Total</th>
                         <th className="px-4 py-3 font-medium">Observações</th>
+                        <th className="px-4 py-3 text-right font-medium">Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/70">
@@ -571,6 +612,20 @@ export function PersonalConsumptionPage() {
                           <td className="px-4 py-3 text-zinc-400">
                             {c.notes || 'Consumo próprio'}
                           </td>
+                          <td className="px-4 py-3 text-right">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDeleteError(null);
+                                setDeleteTarget(c);
+                              }}
+                              aria-label="Excluir retirada"
+                              title="Estornar retirada para o estoque"
+                              className="inline-flex items-center rounded-md border border-zinc-700 bg-zinc-950/60 p-1 text-zinc-400 hover:border-red-900/60 hover:bg-red-950/40 hover:text-red-400"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -581,6 +636,60 @@ export function PersonalConsumptionPage() {
           </div>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      <Modal
+        open={Boolean(deleteTarget)}
+        onClose={() => {
+          if (!deleting) {
+            setDeleteTarget(null);
+            setDeleteError(null);
+          }
+        }}
+        title="Estornar Retirada de Consumo Próprio"
+        subtitle={
+          deleteTarget
+            ? `${deleteTarget.quantity}x ${deleteTarget.productName} · ${formatDateBR(deleteTarget.date)}`
+            : undefined
+        }
+        maxWidth="md"
+      >
+        {deleteTarget && (
+          <div className="space-y-4">
+            {deleteError && (
+              <div className="rounded-lg border border-red-900/60 bg-red-950/50 px-3 py-2 text-xs text-red-300">
+                {deleteError}
+              </div>
+            )}
+
+            <p className="text-xs text-zinc-300">
+              Tem certeza que deseja excluir este registro de consumo próprio? As unidades retiradas retornarão automaticamente para os lotes FIFO disponíveis em estoque.
+            </p>
+
+            <div className="flex justify-end gap-2 border-t border-zinc-800 pt-3">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => {
+                  setDeleteTarget(null);
+                  setDeleteError(null);
+                }}
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={handleConfirmDelete}
+                className="rounded-lg bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-60"
+              >
+                {deleting ? 'Estornando...' : 'Confirmar Estorno'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

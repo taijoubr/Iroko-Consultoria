@@ -1,7 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Download, Plus, Save, Trash2 } from 'lucide-react';
+import { AlertTriangle, Download, Plus, RotateCcw, Save, Trash2 } from 'lucide-react';
+import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
-import { updateSettingsWithHistory } from '../services/firestoreOperations';
+import {
+  resetOperationalData,
+  updateSettingsWithHistory,
+} from '../services/firestoreOperations';
 import { exportJSONBackup, exportSheetsToExcel } from '../utils/excelExport';
 import { formatDateTimeBR, getTodayISO } from '../utils/formatters';
 
@@ -44,6 +48,11 @@ export function SettingsPage() {
 
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [resetIncludeClients, setResetIncludeClients] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState('');
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!settings) return;
@@ -140,6 +149,28 @@ export function SettingsPage() {
       { name: 'Contas_Receber', rows: receivables.map((r) => ({ Doc: r.documentNumber, Cliente: r.clientName, Parcela: `${r.installmentNumber}/${r.totalInstallments}`, Vencimento: r.dueDate, Total: r.totalAmount, Pago: r.paidAmount, Status: r.status })) },
       { name: 'Contas_Pagar', rows: payables.map((p) => ({ Descricao: p.description, Vencimento: p.dueDate, Total: p.totalAmount, Pago: p.paidAmount, Status: p.status })) },
     ]);
+  };
+
+  const handleConfirmReset = async () => {
+    if (!user || resetConfirmText.trim().toUpperCase() !== 'ZERAR') return;
+    setResetError(null);
+    setResetting(true);
+    try {
+      const removedCount = await resetOperationalData(user.uid, {
+        includeClients: resetIncludeClients,
+      });
+      setShowResetModal(false);
+      setResetConfirmText('');
+      setSavedMsg(
+        `Dados operacionais zerados com sucesso (${removedCount} registros removidos). Suas configurações foram preservadas.`
+      );
+    } catch (err) {
+      setResetError(
+        err instanceof Error ? err.message : 'Não foi possível zerar os dados operacionais.'
+      );
+    } finally {
+      setResetting(false);
+    }
   };
 
   return (
@@ -444,6 +475,49 @@ export function SettingsPage() {
         </div>
       </section>
 
+      {/* Reset Operational Data */}
+      <section className="rounded-xl border border-red-900/50 bg-red-950/15 p-5 space-y-3">
+        <div className="flex items-start gap-2.5">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
+          <div>
+            <h2 className="font-display text-sm font-semibold text-zinc-100">
+              Zerar / Resetar Dados Operacionais
+            </h2>
+            <p className="mt-0.5 text-xs text-zinc-400">
+              Remove todas as compras, lotes, movimentações de estoque, produtos, vendas, recebíveis, pagamentos, cartões, despesas e retiradas de consumo próprio para começar do zero. Suas configurações e parâmetros financeiros são preservados.
+            </p>
+          </div>
+        </div>
+
+        <label className="flex items-center gap-2 text-xs text-zinc-300">
+          <input
+            type="checkbox"
+            checked={resetIncludeClients}
+            onChange={(e) => setResetIncludeClients(e.target.checked)}
+            className="accent-red-500"
+          />
+          <span>Excluir também o cadastro de clientes ({clients.length})</span>
+        </label>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+          <p className="text-[11px] text-zinc-500">
+            Atualmente: {purchases.length} compra(s) · {products.length} produto(s) · {sales.length} venda(s) · {personalConsumptions.length} consumo(s) próprio(s)
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setResetError(null);
+              setResetConfirmText('');
+              setShowResetModal(true);
+            }}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-red-800/70 bg-red-950/60 px-4 py-2 text-xs font-medium text-red-200 hover:bg-red-900/60"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Zerar Dados do Sistema
+          </button>
+        </div>
+      </section>
+
       {/* Change History */}
       <section className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
         <div className="border-b border-zinc-800 px-5 py-3.5">
@@ -478,6 +552,67 @@ export function SettingsPage() {
           </div>
         )}
       </section>
+
+      {/* Reset Confirmation Modal */}
+      <Modal
+        open={showResetModal}
+        onClose={() => {
+          if (!resetting) {
+            setShowResetModal(false);
+            setResetError(null);
+          }
+        }}
+        title="Confirmar Limpeza Geral dos Dados"
+        subtitle="Esta ação não pode ser desfeita depois de confirmada."
+        maxWidth="md"
+      >
+        <div className="space-y-4">
+          {resetError && (
+            <div className="rounded-lg border border-red-900/60 bg-red-950/50 px-3 py-2 text-xs text-red-300">
+              {resetError}
+            </div>
+          )}
+
+          <p className="text-xs text-zinc-300">
+            Todos os lançamentos de compras, estoque FIFO, vendas, contas a pagar/receber, cartões e consumo próprio{resetIncludeClients ? ' (incluindo o cadastro de clientes)' : ''} serão apagados permanentemente. Se quiser guardar uma cópia antes, use os botões de <strong>Backup</strong> acima.
+          </p>
+
+          <div>
+            <label className="block text-xs font-medium text-zinc-300">
+              Digite <span className="font-mono font-bold text-red-400">ZERAR</span> para confirmar:
+            </label>
+            <input
+              type="text"
+              value={resetConfirmText}
+              onChange={(e) => setResetConfirmText(e.target.value)}
+              placeholder="ZERAR"
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-red-500 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex justify-end gap-2 border-t border-zinc-800 pt-3">
+            <button
+              type="button"
+              disabled={resetting}
+              onClick={() => {
+                setShowResetModal(false);
+                setResetError(null);
+              }}
+              className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              disabled={resetting || resetConfirmText.trim().toUpperCase() !== 'ZERAR'}
+              onClick={handleConfirmReset}
+              className="rounded-lg bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+            >
+              {resetting ? 'Zerando dados...' : 'Apagar Tudo e Recomeçar'}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

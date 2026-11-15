@@ -1,7 +1,12 @@
 import {
+  collection,
   doc,
+  getDocs,
+  query,
   serverTimestamp,
+  where,
   writeBatch,
+  type DocumentReference,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type {
@@ -13,6 +18,7 @@ import type {
   Payment,
   PaymentSplit,
   PaymentStatus,
+  PersonalConsumption,
   Product,
   Purchase,
   PurchaseBrand,
@@ -2430,4 +2436,99 @@ export async function registerPersonalConsumptionBatch(
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, 'personalConsumptions/batch');
   }
+}
+
+export async function deletePersonalConsumption(
+  consumption: PersonalConsumption,
+  products: Product[],
+  stockLots: StockLot[],
+  stockMovements: StockMovement[]
+): Promise<void> {
+  const batch = writeBatch(db);
+
+  for (const alloc of consumption.lotAllocations) {
+    if (alloc.lotId) {
+      const lot = stockLots.find((l) => l.id === alloc.lotId);
+      if (lot) {
+        batch.update(doc(db, 'stockLots', lot.id), {
+          availableQty: lot.availableQty + alloc.quantity,
+          consumedQty: Math.max(0, lot.consumedQty - alloc.quantity),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+  }
+
+  const prod = products.find((p) => p.id === consumption.productId);
+  if (prod) {
+    batch.update(doc(db, 'products', prod.id), {
+      availableQty: prod.availableQty + consumption.quantity,
+      personalConsumedQty: Math.max(0, prod.personalConsumedQty - consumption.quantity),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  for (const mov of stockMovements) {
+    if (mov.referenceType === 'consumption' && mov.referenceId === consumption.id) {
+      batch.delete(doc(db, 'stockMovements', mov.id));
+    }
+  }
+
+  batch.delete(doc(db, 'personalConsumptions', consumption.id));
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `personalConsumptions/${consumption.id}`);
+  }
+}
+
+export async function resetOperationalData(
+  ownerId: string,
+  options: { includeClients: boolean }
+): Promise<number> {
+  const targetCollections = [
+    'cardSettlements',
+    'payments',
+    'receivables',
+    'sales',
+    'personalConsumptions',
+    'stockMovements',
+    'stockLots',
+    'payables',
+    'purchases',
+    'products',
+    ...(options.includeClients ? ['clients'] : []),
+  ];
+
+  const refsToDelete: DocumentReference[] = [];
+
+  for (const colName of targetCollections) {
+    try {
+      const snap = await getDocs(
+        query(collection(db, colName), where('ownerId', '==', ownerId))
+      );
+      for (const docSnap of snap.docs) {
+        refsToDelete.push(docSnap.ref);
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.LIST, colName);
+    }
+  }
+
+  const CHUNK_SIZE = 450;
+  for (let i = 0; i < refsToDelete.length; i += CHUNK_SIZE) {
+    const chunk = refsToDelete.slice(i, i + CHUNK_SIZE);
+    const batch = writeBatch(db);
+    for (const ref of chunk) {
+      batch.delete(ref);
+    }
+    try {
+      await batch.commit();
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, 'resetOperationalData');
+    }
+  }
+
+  return refsToDelete.length;
 }

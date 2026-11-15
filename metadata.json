@@ -1,6 +1,8 @@
 {
-  "name": "BelaGestão — Gestão Avon & Natura",
+  "name": "Iroko Consultoria",
   "description": "Sistema completo de gestão comercial e financeira para revenda independente de produtos Avon e Natura: compras, estoque FIFO por lotes, clientes, vendas, crédito próprio, financeiro, consumo próprio e relatórios.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
