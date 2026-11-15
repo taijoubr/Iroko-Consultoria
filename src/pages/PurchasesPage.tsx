@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Check, Eye, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, Eye, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
 import {
@@ -10,7 +10,7 @@ import {
   updatePurchase,
   updatePurchaseMetadata,
 } from '../services/firestoreOperations';
-import type { Brand, Product, Purchase, PurchaseBrand, PurchasePaymentMethod } from '../types';
+import type { Brand, Purchase, PurchaseBrand, PurchasePaymentMethod } from '../types';
 import {
   calculatePurchaseFinancials,
   type PurchaseDraftItem,
@@ -23,6 +23,16 @@ import {
   round2,
   translatePaymentMethod,
 } from '../utils/formatters';
+
+interface CatalogEntry {
+  entryId: string;
+  productId?: string;
+  name: string;
+  code: string;
+  brand: Brand;
+  category: string;
+  availableQty: number;
+}
 
 export function PurchasesPage({
   externalOpenNew,
@@ -47,6 +57,8 @@ export function PurchasesPage({
   // Form state
   const [brand, setBrand] = useState<PurchaseBrand>('Avon');
   const [orderNumber, setOrderNumber] = useState('');
+  const [avonOrderNumber, setAvonOrderNumber] = useState('');
+  const [naturaOrderNumber, setNaturaOrderNumber] = useState('');
   const [purchaseDate, setPurchaseDate] = useState(getTodayISO());
   const [billingDate, setBillingDate] = useState('');
   const [referenceDate, setReferenceDate] = useState(getTodayISO());
@@ -71,10 +83,11 @@ export function PurchasesPage({
   const [isProductDropdownOpen, setIsProductDropdownOpen] = useState(false);
   const [highlightedSearchIdx, setHighlightedSearchIdx] = useState(0);
   const [autoFilledFromCode, setAutoFilledFromCode] = useState(false);
-  const [pendingCodeMatch, setPendingCodeMatch] = useState<Product | null>(null);
+  const [pendingCodeMatch, setPendingCodeMatch] = useState<CatalogEntry | null>(null);
   const productCodeInputRef = React.useRef<HTMLInputElement | null>(null);
   const productNameInputRef = React.useRef<HTMLInputElement | null>(null);
   const productDropdownRef = React.useRef<HTMLDivElement | null>(null);
+  const productSearchInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -120,14 +133,60 @@ export function PurchasesPage({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const catalogProductsForBrand = useMemo(() => {
-    if (brand === 'Mista') return products;
-    return products.filter((p) => p.brand === brand);
-  }, [products, brand]);
+  const unifiedCatalog = useMemo<CatalogEntry[]>(() => {
+    const entries: CatalogEntry[] = products.map((p) => ({
+      entryId: p.id,
+      productId: p.id,
+      name: p.name,
+      code: p.code || '',
+      brand: p.brand,
+      category: p.category || 'Outros',
+      availableQty: p.availableQty,
+    }));
+
+    const sortedPurchases = [...purchases].sort((a, b) =>
+      b.purchaseDate.localeCompare(a.purchaseDate)
+    );
+
+    for (const pur of sortedPurchases) {
+      for (const it of pur.items) {
+        const normCode = it.code.trim().toLowerCase();
+        const normName = it.name.trim().toLowerCase();
+        const existing = entries.find(
+          (e) =>
+            (it.productId && e.productId === it.productId) ||
+            (e.brand === it.brand &&
+              ((normCode && e.code.trim().toLowerCase() === normCode) ||
+                (normName && e.name.trim().toLowerCase() === normName)))
+        );
+
+        if (existing) {
+          if (!existing.code.trim() && it.code.trim()) {
+            existing.code = it.code.trim();
+          }
+          if (!existing.name.trim() && it.name.trim()) {
+            existing.name = it.name.trim();
+          }
+        } else if (it.name.trim()) {
+          entries.push({
+            entryId: it.productId || `hist::${it.brand}::${normCode || normName}`,
+            productId: it.productId || undefined,
+            name: it.name.trim(),
+            code: it.code.trim(),
+            brand: it.brand,
+            category: it.category || 'Outros',
+            availableQty: 0,
+          });
+        }
+      }
+    }
+
+    return entries;
+  }, [products, purchases]);
 
   const filteredCatalogProducts = useMemo(() => {
     const q = normalizeText(productSearch);
-    const list = catalogProductsForBrand.filter((p) => {
+    const list = unifiedCatalog.filter((p) => {
       if (!q) return true;
       return (
         normalizeText(p.name).includes(q) ||
@@ -149,19 +208,33 @@ export function PurchasesPage({
         if (aName.startsWith(q) && !bName.startsWith(q)) return -1;
         if (bName.startsWith(q) && !aName.startsWith(q)) return 1;
       }
+      if (brand !== 'Mista') {
+        if (a.brand === brand && b.brand !== brand) return -1;
+        if (b.brand === brand && a.brand !== brand) return 1;
+      }
       return a.name.localeCompare(b.name);
     });
-  }, [catalogProductsForBrand, productSearch]);
+  }, [unifiedCatalog, productSearch, brand]);
 
   const visibleCatalogProducts = useMemo(
-    () => filteredCatalogProducts.slice(0, 40),
+    () => filteredCatalogProducts.slice(0, 60),
     [filteredCatalogProducts]
   );
 
   const selectedCatalogProduct = useMemo(() => {
-    if (!draftItem.productId) return null;
-    return products.find((p) => p.id === draftItem.productId) || null;
-  }, [products, draftItem.productId]);
+    if (draftItem.productId) {
+      return (
+        unifiedCatalog.find((p) => p.productId === draftItem.productId) ||
+        unifiedCatalog.find((p) => p.entryId === draftItem.productId) ||
+        null
+      );
+    }
+    const normCode = draftItem.code.trim().toLowerCase();
+    if (autoFilledFromCode && normCode) {
+      return unifiedCatalog.find((p) => p.code.trim().toLowerCase() === normCode) || null;
+    }
+    return null;
+  }, [unifiedCatalog, draftItem.productId, draftItem.code, autoFilledFromCode]);
 
   const suggestedLastCost = useMemo(() => {
     if (draftItem.productId && lastCostLookup.byProductId.has(draftItem.productId)) {
@@ -200,6 +273,8 @@ export function PurchasesPage({
     setEditingPurchase(null);
     setBrand('Avon');
     setOrderNumber('');
+    setAvonOrderNumber('');
+    setNaturaOrderNumber('');
     setPurchaseDate(getTodayISO());
     setBillingDate('');
     setReferenceDate(getTodayISO());
@@ -222,6 +297,22 @@ export function PurchasesPage({
     setEditingPurchase(p);
     setBrand(p.brand);
     setOrderNumber(p.orderNumber);
+    if (p.brand === 'Mista') {
+      const mistaMatch = p.orderNumber.match(/^Avon\s*:?\s*(.+?)\s*\/\s*Natura\s*:?\s*(.+)$/i);
+      if (mistaMatch) {
+        setAvonOrderNumber(mistaMatch[1].trim());
+        setNaturaOrderNumber(mistaMatch[2].trim());
+      } else {
+        const purLots = stockLots.filter((l) => l.purchaseId === p.id);
+        const avonLot = purLots.find((l) => l.brand === 'Avon' && l.purchaseOrderNumber);
+        const naturaLot = purLots.find((l) => l.brand === 'Natura' && l.purchaseOrderNumber);
+        setAvonOrderNumber(avonLot?.purchaseOrderNumber || p.orderNumber);
+        setNaturaOrderNumber(naturaLot?.purchaseOrderNumber || '');
+      }
+    } else {
+      setAvonOrderNumber('');
+      setNaturaOrderNumber('');
+    }
     setPurchaseDate(p.purchaseDate);
     setBillingDate(p.billingDate || '');
     setReferenceDate(p.referenceDate || p.purchaseDate);
@@ -343,6 +434,17 @@ export function PurchasesPage({
   }, [purchases, brandFilter, searchTerm]);
 
   const handleBrandChange = (newBrand: PurchaseBrand) => {
+    if (newBrand === 'Mista' && brand !== 'Mista' && orderNumber.trim()) {
+      if (brand === 'Avon' && !avonOrderNumber.trim()) {
+        setAvonOrderNumber(orderNumber.trim().slice(0, 24));
+      } else if (brand === 'Natura' && !naturaOrderNumber.trim()) {
+        setNaturaOrderNumber(orderNumber.trim().slice(0, 24));
+      }
+    } else if (newBrand !== 'Mista' && brand === 'Mista' && !orderNumber.trim()) {
+      const carry =
+        newBrand === 'Avon' ? avonOrderNumber.trim() : naturaOrderNumber.trim();
+      if (carry) setOrderNumber(carry);
+    }
     setBrand(newBrand);
     if (newBrand === 'Avon' || newBrand === 'Natura') {
       setItems((prev) => prev.map((it) => ({ ...it, brand: newBrand })));
@@ -371,9 +473,9 @@ export function PurchasesPage({
     });
   };
 
-  const applyCatalogProductToDraft = (found: Product, fromCode: boolean) => {
+  const applyCatalogProductToDraft = (found: CatalogEntry, fromCode: boolean) => {
     updateDraftItem({
-      productId: found.id,
+      productId: found.productId,
       name: found.name,
       code: found.code,
       brand: brand === 'Mista' ? found.brand : brand === 'Natura' ? 'Natura' : 'Avon',
@@ -383,14 +485,14 @@ export function PurchasesPage({
     setPendingCodeMatch(null);
   };
 
-  const handleSelectExistingProduct = (productId: string) => {
-    if (!productId) {
+  const handleSelectExistingProduct = (entryId: string) => {
+    if (!entryId) {
       updateDraftItem({ productId: undefined });
       setAutoFilledFromCode(false);
       setPendingCodeMatch(null);
       return;
     }
-    const found = products.find((p) => p.id === productId);
+    const found = unifiedCatalog.find((p) => p.entryId === entryId);
     if (!found) return;
     applyCatalogProductToDraft(found, false);
     setProductSearch('');
@@ -411,23 +513,34 @@ export function PurchasesPage({
     }
 
     const exactFromCatalog =
-      catalogProductsForBrand.find((p) => p.code.trim().toLowerCase() === normalized) ||
-      (brand === 'Mista'
-        ? products.find((p) => p.code.trim().toLowerCase() === normalized)
-        : undefined);
+      (brand !== 'Mista'
+        ? unifiedCatalog.find(
+            (p) => p.brand === brand && p.code.trim().toLowerCase() === normalized
+          )
+        : undefined) ||
+      unifiedCatalog.find((p) => p.code.trim().toLowerCase() === normalized);
 
     if (exactFromCatalog) {
-      if (!draftItem.name.trim() || autoFilledFromCode) {
+      const shouldOverwriteName =
+        !draftItem.name.trim() ||
+        autoFilledFromCode ||
+        (draftItem.productId && draftItem.productId !== exactFromCatalog.productId);
+      if (shouldOverwriteName) {
         updateDraftItem({
-          productId: exactFromCatalog.id,
+          productId: exactFromCatalog.productId,
           name: exactFromCatalog.name,
           code: rawCode,
-          brand: brand === 'Mista' ? exactFromCatalog.brand : brand === 'Natura' ? 'Natura' : 'Avon',
+          brand:
+            brand === 'Mista'
+              ? exactFromCatalog.brand
+              : brand === 'Natura'
+                ? 'Natura'
+                : 'Avon',
           category: exactFromCatalog.category,
         });
         setAutoFilledFromCode(true);
         setPendingCodeMatch(null);
-      } else if (draftItem.productId !== exactFromCatalog.id) {
+      } else if (draftItem.productId !== exactFromCatalog.productId) {
         updateDraftItem({ code: rawCode });
         setPendingCodeMatch(exactFromCatalog);
       } else {
@@ -438,11 +551,13 @@ export function PurchasesPage({
     }
 
     // Also check items already added in the current order
-    const matchedInOrder = items.find(
-      (it) =>
-        it.code.trim().toLowerCase() === normalized &&
-        (brand === 'Mista' || it.brand === brand)
-    );
+    const matchedInOrder =
+      items.find(
+        (it) =>
+          it.code.trim().toLowerCase() === normalized &&
+          (brand === 'Mista' || it.brand === brand)
+      ) || items.find((it) => it.code.trim().toLowerCase() === normalized);
+
     if (matchedInOrder && (!draftItem.name.trim() || autoFilledFromCode)) {
       updateDraftItem({
         productId: matchedInOrder.productId,
@@ -591,12 +706,28 @@ export function PurchasesPage({
       return;
     }
 
+    let finalOrderNumber = orderNumber.trim();
+    if (brand === 'Mista') {
+      const avonNum = avonOrderNumber.trim();
+      const naturaNum = naturaOrderNumber.trim();
+      if (!avonNum || !naturaNum) {
+        setErrorMsg('Em compras mistas, informe os dois números de pedido (Avon e Natura).');
+        return;
+      }
+      finalOrderNumber = `Avon ${avonNum} / Natura ${naturaNum}`.slice(0, 64);
+    } else if (!finalOrderNumber) {
+      setErrorMsg('Informe o número do pedido.');
+      return;
+    }
+
     setSubmitting(true);
 
     try {
       const payload = {
         brand,
-        orderNumber,
+        orderNumber: finalOrderNumber,
+        avonOrderNumber: brand === 'Mista' ? avonOrderNumber.trim() : undefined,
+        naturaOrderNumber: brand === 'Mista' ? naturaOrderNumber.trim() : undefined,
         purchaseDate,
         billingDate,
         referenceDate,
@@ -618,10 +749,10 @@ export function PurchasesPage({
           stockMovements,
           payables
         );
-        setSuccessMsg(`Pedido ${orderNumber} atualizado com sucesso.`);
+        setSuccessMsg(`Pedido ${finalOrderNumber} atualizado com sucesso.`);
       } else {
         await registerPurchase(user.uid, payload, settings, products);
-        setSuccessMsg(`Pedido ${orderNumber} registrado e integrado ao estoque e financeiro.`);
+        setSuccessMsg(`Pedido ${finalOrderNumber} registrado e integrado ao estoque e financeiro.`);
       }
 
       resetFormToNew();
@@ -929,17 +1060,47 @@ export function PurchasesPage({
               </select>
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-zinc-300">Número do Pedido *</label>
-              <input
-                type="text"
-                required
-                value={orderNumber}
-                onChange={(e) => setOrderNumber(e.target.value)}
-                placeholder="Ex.: 9845120"
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
+            {brand === 'Mista' ? (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-300">Pedido Avon *</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={24}
+                    value={avonOrderNumber}
+                    onChange={(e) => setAvonOrderNumber(e.target.value)}
+                    placeholder="Ex.: 913621006"
+                    className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-zinc-300">Pedido Natura *</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={24}
+                    value={naturaOrderNumber}
+                    onChange={(e) => setNaturaOrderNumber(e.target.value)}
+                    placeholder="Ex.: 884210055"
+                    className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-xs font-medium text-zinc-300">Número do Pedido *</label>
+                <input
+                  type="text"
+                  required
+                  maxLength={64}
+                  value={orderNumber}
+                  onChange={(e) => setOrderNumber(e.target.value)}
+                  placeholder="Ex.: 9845120"
+                  className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-medium text-zinc-300">Forma de Pagamento</label>
@@ -1047,125 +1208,172 @@ export function PurchasesPage({
                       </span>
                     </div>
 
-                    {catalogProductsForBrand.length > 0 && (
-                      <div ref={productDropdownRef} className="relative">
+                    <div ref={productDropdownRef} className="relative">
+                      <div className="flex items-center justify-between gap-2">
                         <label className="block text-[11px] font-medium text-zinc-400">
                           Reutilizar Produto Cadastrado (pesquise por nome ou código)
                         </label>
-                        <div className="relative mt-0.5">
-                          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
-                          <input
-                            type="text"
-                            value={productSearch}
-                            onFocus={() => {
-                              setIsProductDropdownOpen(true);
+                        {unifiedCatalog.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsProductDropdownOpen((prev) => !prev);
                               setHighlightedSearchIdx(0);
+                              productSearchInputRef.current?.focus();
                             }}
-                            onChange={(e) => {
-                              setProductSearch(e.target.value);
-                              setIsProductDropdownOpen(true);
-                              setHighlightedSearchIdx(0);
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'ArrowDown') {
-                                e.preventDefault();
-                                setIsProductDropdownOpen(true);
-                                setHighlightedSearchIdx((prev) =>
-                                  visibleCatalogProducts.length > 0
-                                    ? Math.min(prev + 1, visibleCatalogProducts.length - 1)
-                                    : 0
-                                );
-                              } else if (e.key === 'ArrowUp') {
-                                e.preventDefault();
-                                setHighlightedSearchIdx((prev) => Math.max(prev - 1, 0));
-                              } else if (e.key === 'Enter' && isProductDropdownOpen) {
-                                e.preventDefault();
-                                const picked = visibleCatalogProducts[highlightedSearchIdx];
-                                if (picked) {
-                                  handleSelectExistingProduct(picked.id);
-                                }
-                              } else if (e.key === 'Escape') {
-                                setIsProductDropdownOpen(false);
-                              }
-                            }}
-                            placeholder={`Pesquisar entre ${catalogProductsForBrand.length} produto(s) salvo(s)...`}
-                            className="w-full rounded border border-zinc-700 bg-zinc-900 py-1.5 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
-                          />
-                          {productSearch && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setProductSearch('');
-                                setHighlightedSearchIdx(0);
-                              }}
-                              aria-label="Limpar busca"
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-100"
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                        </div>
-
-                        {isProductDropdownOpen && (
-                          <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
-                            {visibleCatalogProducts.length === 0 ? (
-                              <div className="px-3 py-3 text-xs text-zinc-400">
-                                Nenhum produto encontrado para &ldquo;{productSearch}&rdquo;. Preencha o código e nome abaixo para cadastrar como novo.
-                              </div>
-                            ) : (
-                              <>
-                                {visibleCatalogProducts.map((pr, idx) => {
-                                  const prevCost =
-                                    lastCostLookup.byProductId.get(pr.id) ??
-                                    (pr.code
-                                      ? lastCostLookup.byCode.get(pr.code.trim().toLowerCase())
-                                      : undefined);
-                                  const isActive = idx === highlightedSearchIdx;
-                                  return (
-                                    <button
-                                      key={pr.id}
-                                      type="button"
-                                      onMouseEnter={() => setHighlightedSearchIdx(idx)}
-                                      onClick={() => handleSelectExistingProduct(pr.id)}
-                                      className={`flex w-full items-center justify-between gap-2 border-b border-zinc-800/70 px-3 py-2 text-left text-xs last:border-b-0 ${
-                                        isActive
-                                          ? 'bg-emerald-950/60 text-zinc-100'
-                                          : 'text-zinc-200 hover:bg-zinc-800/70'
-                                      }`}
-                                    >
-                                      <div className="min-w-0">
-                                        <p className="truncate font-medium">
-                                          {pr.name}
-                                          {pr.code && (
-                                            <span className="font-mono-num ml-1.5 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
-                                              #{pr.code}
-                                            </span>
-                                          )}
-                                        </p>
-                                        <p className="text-[11px] text-zinc-400">
-                                          {pr.brand} · {pr.category} · Estoque: {pr.availableQty} un.
-                                        </p>
-                                      </div>
-                                      {prevCost !== undefined && (
-                                        <span className="font-mono-num shrink-0 text-[11px] text-zinc-400">
-                                          Últ.: {formatCurrency(prevCost)}
-                                        </span>
-                                      )}
-                                    </button>
-                                  );
-                                })}
-                                {filteredCatalogProducts.length > visibleCatalogProducts.length && (
-                                  <div className="border-t border-zinc-800 bg-zinc-950/60 px-3 py-1.5 text-[11px] text-zinc-400">
-                                    Mostrando {visibleCatalogProducts.length} de{' '}
-                                    {filteredCatalogProducts.length} produtos — digite mais para filtrar.
-                                  </div>
-                                )}
-                              </>
-                            )}
-                          </div>
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300"
+                          >
+                            {isProductDropdownOpen
+                              ? 'Ocultar lista'
+                              : `Ver lista (${unifiedCatalog.length})`}
+                            <ChevronDown
+                              className={`h-3 w-3 transition-transform ${
+                                isProductDropdownOpen ? 'rotate-180' : ''
+                              }`}
+                            />
+                          </button>
                         )}
                       </div>
-                    )}
+
+                      {unifiedCatalog.length === 0 ? (
+                        <p className="mt-1 rounded border border-zinc-800/80 bg-zinc-900/50 px-2.5 py-1.5 text-[11px] text-zinc-500">
+                          Nenhum produto cadastrado ainda. Preencha o código e nome abaixo para criar o catálogo automaticamente.
+                        </p>
+                      ) : (
+                        <>
+                          <div className="relative mt-0.5">
+                            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                            <input
+                              ref={productSearchInputRef}
+                              type="text"
+                              value={productSearch}
+                              onFocus={() => {
+                                setIsProductDropdownOpen(true);
+                                setHighlightedSearchIdx(0);
+                              }}
+                              onChange={(e) => {
+                                setProductSearch(e.target.value);
+                                setIsProductDropdownOpen(true);
+                                setHighlightedSearchIdx(0);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'ArrowDown') {
+                                  e.preventDefault();
+                                  setIsProductDropdownOpen(true);
+                                  setHighlightedSearchIdx((prev) =>
+                                    visibleCatalogProducts.length > 0
+                                      ? Math.min(prev + 1, visibleCatalogProducts.length - 1)
+                                      : 0
+                                  );
+                                } else if (e.key === 'ArrowUp') {
+                                  e.preventDefault();
+                                  setHighlightedSearchIdx((prev) => Math.max(prev - 1, 0));
+                                } else if (e.key === 'Enter' && isProductDropdownOpen) {
+                                  e.preventDefault();
+                                  const picked = visibleCatalogProducts[highlightedSearchIdx];
+                                  if (picked) {
+                                    handleSelectExistingProduct(picked.entryId);
+                                  }
+                                } else if (e.key === 'Escape') {
+                                  setIsProductDropdownOpen(false);
+                                }
+                              }}
+                              placeholder={`Pesquisar entre ${unifiedCatalog.length} produto(s) salvo(s)...`}
+                              className="w-full rounded border border-zinc-700 bg-zinc-900 py-1.5 pl-8 pr-14 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                            />
+                            <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                              {productSearch && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setProductSearch('');
+                                    setHighlightedSearchIdx(0);
+                                    productSearchInputRef.current?.focus();
+                                  }}
+                                  aria-label="Limpar busca"
+                                  className="text-zinc-400 hover:text-zinc-100"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setIsProductDropdownOpen((prev) => !prev)}
+                                aria-label="Abrir ou fechar lista de produtos"
+                                className="text-zinc-400 hover:text-zinc-100"
+                              >
+                                <ChevronDown
+                                  className={`h-3.5 w-3.5 transition-transform ${
+                                    isProductDropdownOpen ? 'rotate-180' : ''
+                                  }`}
+                                />
+                              </button>
+                            </div>
+                          </div>
+
+                          {isProductDropdownOpen && (
+                            <div className="absolute z-30 mt-1 max-h-60 w-full overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+                              {visibleCatalogProducts.length === 0 ? (
+                                <div className="px-3 py-3 text-xs text-zinc-400">
+                                  Nenhum produto encontrado para &ldquo;{productSearch}&rdquo;. Preencha o código e nome abaixo para cadastrar como novo.
+                                </div>
+                              ) : (
+                                <>
+                                  {visibleCatalogProducts.map((pr, idx) => {
+                                    const prevCost =
+                                      (pr.productId
+                                        ? lastCostLookup.byProductId.get(pr.productId)
+                                        : undefined) ??
+                                      (pr.code
+                                        ? lastCostLookup.byCode.get(pr.code.trim().toLowerCase())
+                                        : undefined);
+                                    const isActive = idx === highlightedSearchIdx;
+                                    return (
+                                      <button
+                                        key={pr.entryId}
+                                        type="button"
+                                        onMouseEnter={() => setHighlightedSearchIdx(idx)}
+                                        onClick={() => handleSelectExistingProduct(pr.entryId)}
+                                        className={`flex w-full items-center justify-between gap-2 border-b border-zinc-800/70 px-3 py-2 text-left text-xs last:border-b-0 ${
+                                          isActive
+                                            ? 'bg-emerald-950/60 text-zinc-100'
+                                            : 'text-zinc-200 hover:bg-zinc-800/70'
+                                        }`}
+                                      >
+                                        <div className="min-w-0">
+                                          <p className="truncate font-medium">
+                                            {pr.name}
+                                            {pr.code && (
+                                              <span className="font-mono-num ml-1.5 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                                                #{pr.code}
+                                              </span>
+                                            )}
+                                          </p>
+                                          <p className="text-[11px] text-zinc-400">
+                                            {pr.brand} · {pr.category} · Estoque: {pr.availableQty} un.
+                                          </p>
+                                        </div>
+                                        {prevCost !== undefined && (
+                                          <span className="font-mono-num shrink-0 text-[11px] text-zinc-400">
+                                            Últ.: {formatCurrency(prevCost)}
+                                          </span>
+                                        )}
+                                      </button>
+                                    );
+                                  })}
+                                  {filteredCatalogProducts.length > visibleCatalogProducts.length && (
+                                    <div className="border-t border-zinc-800 bg-zinc-950/60 px-3 py-1.5 text-[11px] text-zinc-400">
+                                      Mostrando {visibleCatalogProducts.length} de{' '}
+                                      {filteredCatalogProducts.length} produtos — digite mais para filtrar.
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
 
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
                       <div className="sm:col-span-3">

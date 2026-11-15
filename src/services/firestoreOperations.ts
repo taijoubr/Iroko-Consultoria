@@ -11,6 +11,7 @@ import {
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type {
   AppSettings,
+  Brand,
   CardSettlement,
   Client,
   DeliveryStatus,
@@ -159,6 +160,8 @@ export async function updateSettingsWithHistory(
 export interface RegisterPurchaseInput {
   brand: PurchaseBrand;
   orderNumber: string;
+  avonOrderNumber?: string;
+  naturaOrderNumber?: string;
   purchaseDate: string;
   billingDate: string;
   referenceDate: string;
@@ -167,6 +170,21 @@ export interface RegisterPurchaseInput {
   overrideEffectiveTotal?: number;
   notes: string;
   items: PurchaseDraftItem[];
+}
+
+function resolveLotOrderNumber(
+  input: Pick<RegisterPurchaseInput, 'brand' | 'orderNumber' | 'avonOrderNumber' | 'naturaOrderNumber'>,
+  itemBrand: Brand
+): string {
+  if (input.brand === 'Mista') {
+    if (itemBrand === 'Avon' && input.avonOrderNumber?.trim()) {
+      return sanitizeStr(input.avonOrderNumber.trim(), 64);
+    }
+    if (itemBrand === 'Natura' && input.naturaOrderNumber?.trim()) {
+      return sanitizeStr(input.naturaOrderNumber.trim(), 64);
+    }
+  }
+  return sanitizeStr(input.orderNumber, 64);
 }
 
 export async function registerPurchase(
@@ -209,7 +227,14 @@ export async function registerPurchase(
   // Track cumulative updates if multiple lines in same purchase hit same product
   const productAccum = new Map<
     string,
-    { refId: string; isNew: boolean; prod: Product; addAvail: number; addRes: number }
+    {
+      refId: string;
+      isNew: boolean;
+      prod: Product;
+      addAvail: number;
+      addRes: number;
+      latestCode: string;
+    }
   >();
 
   const finalizedItems = calc.items.map((item) => {
@@ -255,6 +280,7 @@ export async function registerPurchase(
           prod: newProd,
           addAvail: 0,
           addRes: 0,
+          latestCode: sanitizeStr(item.code, 64),
         });
       }
     } else if (!productAccum.has(productId)) {
@@ -264,12 +290,17 @@ export async function registerPurchase(
         prod: matched!,
         addAvail: 0,
         addRes: 0,
+        latestCode: sanitizeStr(item.code, 64),
       });
     }
 
     const accumEntry = Array.from(productAccum.values()).find((e) => e.refId === productId)!;
     accumEntry.addAvail += item.qtyForStock;
     accumEntry.addRes += item.qtyForClients;
+    if (!accumEntry.latestCode && item.code.trim()) {
+      accumEntry.latestCode = sanitizeStr(item.code, 64);
+    }
+    const lotOrderNumber = resolveLotOrderNumber(input, item.brand);
 
     // Create StockLot
     const lotId = generateId('lot');
@@ -280,7 +311,7 @@ export async function registerPurchase(
       productCode: sanitizeStr(item.code, 64),
       brand: item.brand,
       purchaseId,
-      purchaseOrderNumber: sanitizeStr(input.orderNumber, 64),
+      purchaseOrderNumber: lotOrderNumber,
       purchaseDate: input.purchaseDate,
       initialQty: item.quantity,
       availableQty: item.qtyForStock,
@@ -311,7 +342,7 @@ export async function registerPurchase(
       referenceType: 'purchase',
       referenceId: purchaseId,
       date: input.purchaseDate,
-      notes: sanitizeStr(`Entrada Pedido ${input.orderNumber} (${item.brand})`, 300),
+      notes: sanitizeStr(`Entrada Pedido ${lotOrderNumber} (${item.brand})`, 300),
       createdAt: serverTimestamp(),
     });
 
@@ -332,7 +363,7 @@ export async function registerPurchase(
         referenceType: 'purchase',
         referenceId: purchaseId,
         date: input.purchaseDate,
-        notes: sanitizeStr(`Destinado a encomendas de clientes no Pedido ${input.orderNumber}`, 300),
+        notes: sanitizeStr(`Destinado a encomendas de clientes no Pedido ${lotOrderNumber}`, 300),
         createdAt: serverTimestamp(),
       });
     }
@@ -361,11 +392,15 @@ export async function registerPurchase(
         updatedAt: serverTimestamp(),
       });
     } else {
-      batch.update(pRef, {
+      const updatePayload: Record<string, unknown> = {
         availableQty: entry.prod.availableQty + entry.addAvail,
         reservedQty: entry.prod.reservedQty + entry.addRes,
         updatedAt: serverTimestamp(),
-      });
+      };
+      if (!entry.prod.code.trim() && entry.latestCode) {
+        updatePayload.code = entry.latestCode;
+      }
+      batch.update(pRef, updatePayload);
     }
   }
 
@@ -596,9 +631,10 @@ export async function updatePurchase(
       updatedAt: serverTimestamp(),
     });
     for (const lot of oldLots) {
-      if (lot.purchaseOrderNumber !== safeOrderNumber) {
+      const nextLotOrder = resolveLotOrderNumber(input, lot.brand);
+      if (lot.purchaseOrderNumber !== nextLotOrder) {
         batch.update(doc(db, 'stockLots', lot.id), {
-          purchaseOrderNumber: safeOrderNumber,
+          purchaseOrderNumber: nextLotOrder,
           updatedAt: serverTimestamp(),
         });
       }
@@ -655,7 +691,14 @@ export async function updatePurchase(
 
   const productAccum = new Map<
     string,
-    { refId: string; isNew: boolean; prod: Product; addAvail: number; addRes: number }
+    {
+      refId: string;
+      isNew: boolean;
+      prod: Product;
+      addAvail: number;
+      addRes: number;
+      latestCode: string;
+    }
   >();
   // Pre-register reverted existing products that were touched by oldLots so even removed lines get decremented once
   for (const lot of oldLots) {
@@ -667,6 +710,7 @@ export async function updatePurchase(
         prod: wp,
         addAvail: 0,
         addRes: 0,
+        latestCode: wp.code || '',
       });
     }
   }
@@ -721,6 +765,7 @@ export async function updatePurchase(
           prod: newProd,
           addAvail: 0,
           addRes: 0,
+          latestCode: sanitizeStr(item.code, 64),
         });
       }
     } else if (!productAccum.has(productId)) {
@@ -730,12 +775,17 @@ export async function updatePurchase(
         prod: matched!,
         addAvail: 0,
         addRes: 0,
+        latestCode: sanitizeStr(item.code, 64),
       });
     }
 
     const accumEntry = Array.from(productAccum.values()).find((e) => e.refId === productId)!;
     accumEntry.addAvail += item.qtyForStock;
     accumEntry.addRes += item.qtyForClients;
+    if (!accumEntry.latestCode && item.code.trim()) {
+      accumEntry.latestCode = sanitizeStr(item.code, 64);
+    }
+    const lotOrderNumber = resolveLotOrderNumber(input, item.brand);
 
     const lotId = generateId('lot');
     batch.set(doc(db, 'stockLots', lotId), {
@@ -745,7 +795,7 @@ export async function updatePurchase(
       productCode: sanitizeStr(item.code, 64),
       brand: item.brand,
       purchaseId: existingPurchase.id,
-      purchaseOrderNumber: sanitizeStr(input.orderNumber, 64),
+      purchaseOrderNumber: lotOrderNumber,
       purchaseDate: input.purchaseDate,
       initialQty: item.quantity,
       availableQty: item.qtyForStock,
@@ -774,7 +824,7 @@ export async function updatePurchase(
       referenceType: 'purchase',
       referenceId: existingPurchase.id,
       date: input.purchaseDate,
-      notes: sanitizeStr(`Entrada Pedido ${input.orderNumber} (${item.brand})`, 300),
+      notes: sanitizeStr(`Entrada Pedido ${lotOrderNumber} (${item.brand})`, 300),
       createdAt: serverTimestamp(),
     });
 
@@ -794,7 +844,10 @@ export async function updatePurchase(
         referenceType: 'purchase',
         referenceId: existingPurchase.id,
         date: input.purchaseDate,
-        notes: sanitizeStr(`Destinado a encomendas de clientes no Pedido ${input.orderNumber}`, 300),
+        notes: sanitizeStr(
+          `Destinado a encomendas de clientes no Pedido ${lotOrderNumber}`,
+          300
+        ),
         createdAt: serverTimestamp(),
       });
     }
@@ -835,11 +888,15 @@ export async function updatePurchase(
       ) {
         batch.delete(pRef);
       } else {
-        batch.update(pRef, {
+        const updatePayload: Record<string, unknown> = {
           availableQty: nextAvail,
           reservedQty: nextRes,
           updatedAt: serverTimestamp(),
-        });
+        };
+        if (!entry.prod.code.trim() && entry.latestCode) {
+          updatePayload.code = entry.latestCode;
+        }
+        batch.update(pRef, updatePayload);
       }
     }
   }

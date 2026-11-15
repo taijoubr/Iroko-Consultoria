@@ -1,5 +1,15 @@
 import React, { useMemo, useState } from 'react';
-import { Check, Coffee, Minus, Plus, Search, ShoppingBasket, Trash2, X } from 'lucide-react';
+import {
+  Check,
+  ChevronDown,
+  Coffee,
+  Minus,
+  Plus,
+  Search,
+  ShoppingBasket,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
 import {
@@ -412,44 +422,73 @@ export function PersonalConsumptionPage() {
             </div>
 
             <div ref={productDropdownRef} className="relative">
-              <label className="block text-[11px] font-medium text-zinc-400">
-                Buscar Produto do Estoque (nome ou código)
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-[11px] font-medium text-zinc-400">
+                  Buscar Produto do Estoque (nome ou código)
+                </label>
+                {products.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsProductDropdownOpen((prev) => !prev);
+                      setHighlightedIdx(0);
+                      productSearchInputRef.current?.focus();
+                    }}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300"
+                  >
+                    {isProductDropdownOpen
+                      ? 'Ocultar lista'
+                      : `Ver lista (${products.length})`}
+                    <ChevronDown
+                      className={`h-3 w-3 transition-transform ${
+                        isProductDropdownOpen ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+                )}
+              </div>
               <div className="relative mt-1">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
                 <input
                   ref={productSearchInputRef}
                   type="text"
                   value={
-                    isProductDropdownOpen
+                    productSearch.length > 0
                       ? productSearch
                       : selectedProduct
                         ? `${selectedProduct.brand} · ${selectedProduct.name}${selectedProduct.code ? ` (#${selectedProduct.code})` : ''}`
-                        : productSearch
+                        : ''
                   }
-                  onFocus={() => {
+                  onFocus={(e) => {
                     setHighlightedIdx(0);
                     setIsProductDropdownOpen(true);
+                    e.currentTarget.select();
                   }}
                   onChange={(e) => {
                     const nextVal = e.target.value;
                     setProductSearch(nextVal);
-                    if (selectedProduct) setProductId('');
                     setHighlightedIdx(0);
                     setIsProductDropdownOpen(true);
                     setErrorMsg(null);
 
                     const norm = normalizeSearch(nextVal);
-                    if (norm) {
-                      const exactCodeMatch = products.find(
-                        (p) => normalizeSearch(p.code) === norm
-                      );
-                      if (exactCodeMatch) {
-                        handleSelectPickerProduct(exactCodeMatch.id);
-                      }
+                    const exactCodeMatch = norm
+                      ? products.find((p) => normalizeSearch(p.code) === norm)
+                      : undefined;
+                    if (exactCodeMatch) {
+                      setProductId(exactCodeMatch.id);
+                    } else if (selectedProduct) {
+                      setProductId('');
                     }
                   }}
                   onKeyDown={(e) => {
+                    if (e.key === 'Backspace' && selectedProduct && productSearch === '') {
+                      e.preventDefault();
+                      setProductId('');
+                      setProductSearch('');
+                      setIsProductDropdownOpen(true);
+                      return;
+                    }
                     if (e.key === 'ArrowDown') {
                       e.preventDefault();
                       setIsProductDropdownOpen(true);
@@ -476,23 +515,38 @@ export function PersonalConsumptionPage() {
                     }
                   }}
                   placeholder={`Pesquisar entre ${products.length} produto(s) por nome ou código...`}
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-2 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-2 pl-8 pr-14 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
                 />
-                {(productSearch || selectedProduct) && (
+                <div className="absolute right-2.5 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                  {(productSearch || selectedProduct) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProductSearch('');
+                        setProductId('');
+                        setHighlightedIdx(0);
+                        setIsProductDropdownOpen(true);
+                        productSearchInputRef.current?.focus();
+                      }}
+                      aria-label="Limpar busca"
+                      className="text-zinc-400 hover:text-zinc-100"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => {
-                      setProductSearch('');
-                      setProductId('');
-                      setHighlightedIdx(0);
-                      productSearchInputRef.current?.focus();
-                    }}
-                    aria-label="Limpar busca"
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-100"
+                    onClick={() => setIsProductDropdownOpen((prev) => !prev)}
+                    aria-label="Abrir ou fechar lista de produtos"
+                    className="text-zinc-400 hover:text-zinc-100"
                   >
-                    <X className="h-3.5 w-3.5" />
+                    <ChevronDown
+                      className={`h-3.5 w-3.5 transition-transform ${
+                        isProductDropdownOpen ? 'rotate-180' : ''
+                      }`}
+                    />
                   </button>
-                )}
+                </div>
               </div>
 
               {isProductDropdownOpen && (
