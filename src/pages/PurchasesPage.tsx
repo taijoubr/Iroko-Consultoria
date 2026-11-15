@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Eye, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Check, Eye, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
 import {
@@ -10,7 +10,7 @@ import {
   updatePurchase,
   updatePurchaseMetadata,
 } from '../services/firestoreOperations';
-import type { Brand, Purchase, PurchaseBrand, PurchasePaymentMethod } from '../types';
+import type { Brand, Product, Purchase, PurchaseBrand, PurchasePaymentMethod } from '../types';
 import {
   calculatePurchaseFinancials,
   type PurchaseDraftItem,
@@ -66,13 +66,112 @@ export function PurchasesPage({
   });
   const [draftUnitCostText, setDraftUnitCostText] = useState('');
   const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
+  const [productSearch, setProductSearch] = useState('');
+  const [isProductDropdownOpen, setIsProductDropdownOpen] = useState(false);
+  const [highlightedSearchIdx, setHighlightedSearchIdx] = useState(0);
+  const [autoFilledFromCode, setAutoFilledFromCode] = useState(false);
+  const [pendingCodeMatch, setPendingCodeMatch] = useState<Product | null>(null);
+  const productCodeInputRef = React.useRef<HTMLInputElement | null>(null);
   const productNameInputRef = React.useRef<HTMLInputElement | null>(null);
+  const productDropdownRef = React.useRef<HTMLDivElement | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   const categories = settings?.categories?.length ? settings.categories : DEFAULT_CATEGORIES;
+
+  const normalizeText = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+
+  const lastCostLookup = useMemo(() => {
+    const byProductId = new Map<string, number>();
+    const byCode = new Map<string, number>();
+    const sorted = [...purchases].sort((a, b) => b.purchaseDate.localeCompare(a.purchaseDate));
+    for (const purchase of sorted) {
+      for (const item of purchase.items) {
+        if (item.productId && !byProductId.has(item.productId) && item.unitOriginalCost > 0) {
+          byProductId.set(item.productId, item.unitOriginalCost);
+        }
+        const normCode = item.code.trim().toLowerCase();
+        if (normCode && !byCode.has(normCode) && item.unitOriginalCost > 0) {
+          byCode.set(normCode, item.unitOriginalCost);
+        }
+      }
+    }
+    return { byProductId, byCode };
+  }, [purchases]);
+
+  React.useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        productDropdownRef.current &&
+        !productDropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsProductDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const catalogProductsForBrand = useMemo(() => {
+    if (brand === 'Mista') return products;
+    return products.filter((p) => p.brand === brand);
+  }, [products, brand]);
+
+  const filteredCatalogProducts = useMemo(() => {
+    const q = normalizeText(productSearch);
+    const list = catalogProductsForBrand.filter((p) => {
+      if (!q) return true;
+      return (
+        normalizeText(p.name).includes(q) ||
+        normalizeText(p.code).includes(q) ||
+        normalizeText(p.category).includes(q) ||
+        normalizeText(p.brand).includes(q)
+      );
+    });
+    return [...list].sort((a, b) => {
+      if (q) {
+        const aCode = normalizeText(a.code);
+        const bCode = normalizeText(b.code);
+        if (aCode === q && bCode !== q) return -1;
+        if (bCode === q && aCode !== q) return 1;
+        if (aCode.startsWith(q) && !bCode.startsWith(q)) return -1;
+        if (bCode.startsWith(q) && !aCode.startsWith(q)) return 1;
+        const aName = normalizeText(a.name);
+        const bName = normalizeText(b.name);
+        if (aName.startsWith(q) && !bName.startsWith(q)) return -1;
+        if (bName.startsWith(q) && !aName.startsWith(q)) return 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+  }, [catalogProductsForBrand, productSearch]);
+
+  const visibleCatalogProducts = useMemo(
+    () => filteredCatalogProducts.slice(0, 40),
+    [filteredCatalogProducts]
+  );
+
+  const selectedCatalogProduct = useMemo(() => {
+    if (!draftItem.productId) return null;
+    return products.find((p) => p.id === draftItem.productId) || null;
+  }, [products, draftItem.productId]);
+
+  const suggestedLastCost = useMemo(() => {
+    if (draftItem.productId && lastCostLookup.byProductId.has(draftItem.productId)) {
+      return lastCostLookup.byProductId.get(draftItem.productId) || null;
+    }
+    const normCode = draftItem.code.trim().toLowerCase();
+    if (normCode && lastCostLookup.byCode.has(normCode)) {
+      return lastCostLookup.byCode.get(normCode) || null;
+    }
+    return null;
+  }, [draftItem.productId, draftItem.code, lastCostLookup]);
 
   const createEmptyDraft = (
     targetBrand: PurchaseBrand = brand,
@@ -103,6 +202,10 @@ export function PurchasesPage({
     setDraftItem(createEmptyDraft('Avon', initialCat));
     setDraftUnitCostText('');
     setEditingItemIndex(null);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+    setAutoFilledFromCode(false);
+    setPendingCodeMatch(null);
     setErrorMsg(null);
   };
 
@@ -135,6 +238,10 @@ export function PurchasesPage({
     setDraftItem(createEmptyDraft(p.brand, p.items[0]?.category || categories[0] || 'Perfumaria'));
     setDraftUnitCostText('');
     setEditingItemIndex(null);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+    setAutoFilledFromCode(false);
+    setPendingCodeMatch(null);
     setErrorMsg(null);
     setSelectedPurchase(null);
     setShowNewModal(true);
@@ -221,13 +328,7 @@ export function PurchasesPage({
     });
   };
 
-  const handleSelectExistingProduct = (productId: string) => {
-    if (!productId) {
-      updateDraftItem({ productId: undefined });
-      return;
-    }
-    const found = products.find((p) => p.id === productId);
-    if (!found) return;
+  const applyCatalogProductToDraft = (found: Product, fromCode: boolean) => {
     updateDraftItem({
       productId: found.id,
       name: found.name,
@@ -235,6 +336,90 @@ export function PurchasesPage({
       brand: brand === 'Mista' ? found.brand : brand === 'Natura' ? 'Natura' : 'Avon',
       category: found.category,
     });
+    setAutoFilledFromCode(fromCode);
+    setPendingCodeMatch(null);
+  };
+
+  const handleSelectExistingProduct = (productId: string) => {
+    if (!productId) {
+      updateDraftItem({ productId: undefined });
+      setAutoFilledFromCode(false);
+      setPendingCodeMatch(null);
+      return;
+    }
+    const found = products.find((p) => p.id === productId);
+    if (!found) return;
+    applyCatalogProductToDraft(found, false);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+  };
+
+  const handleDraftCodeChange = (rawCode: string) => {
+    const normalized = rawCode.trim().toLowerCase();
+    if (!normalized) {
+      setPendingCodeMatch(null);
+      if (autoFilledFromCode) {
+        updateDraftItem({ code: rawCode, productId: undefined, name: '' });
+        setAutoFilledFromCode(false);
+      } else {
+        updateDraftItem({ code: rawCode });
+      }
+      return;
+    }
+
+    const exactFromCatalog =
+      catalogProductsForBrand.find((p) => p.code.trim().toLowerCase() === normalized) ||
+      (brand === 'Mista'
+        ? products.find((p) => p.code.trim().toLowerCase() === normalized)
+        : undefined);
+
+    if (exactFromCatalog) {
+      if (!draftItem.name.trim() || autoFilledFromCode) {
+        updateDraftItem({
+          productId: exactFromCatalog.id,
+          name: exactFromCatalog.name,
+          code: rawCode,
+          brand: brand === 'Mista' ? exactFromCatalog.brand : brand === 'Natura' ? 'Natura' : 'Avon',
+          category: exactFromCatalog.category,
+        });
+        setAutoFilledFromCode(true);
+        setPendingCodeMatch(null);
+      } else if (draftItem.productId !== exactFromCatalog.id) {
+        updateDraftItem({ code: rawCode });
+        setPendingCodeMatch(exactFromCatalog);
+      } else {
+        updateDraftItem({ code: rawCode });
+        setPendingCodeMatch(null);
+      }
+      return;
+    }
+
+    // Also check items already added in the current order
+    const matchedInOrder = items.find(
+      (it) =>
+        it.code.trim().toLowerCase() === normalized &&
+        (brand === 'Mista' || it.brand === brand)
+    );
+    if (matchedInOrder && (!draftItem.name.trim() || autoFilledFromCode)) {
+      updateDraftItem({
+        productId: matchedInOrder.productId,
+        name: matchedInOrder.name,
+        code: rawCode,
+        brand: brand === 'Mista' ? matchedInOrder.brand : brand === 'Natura' ? 'Natura' : 'Avon',
+        category: matchedInOrder.category,
+      });
+      setAutoFilledFromCode(true);
+      setPendingCodeMatch(null);
+      return;
+    }
+
+    setPendingCodeMatch(null);
+    if (autoFilledFromCode) {
+      updateDraftItem({ code: rawCode, productId: undefined, name: '' });
+      setAutoFilledFromCode(false);
+    } else {
+      updateDraftItem({ code: rawCode });
+    }
   };
 
   const handleSaveDraftItem = () => {
@@ -249,6 +434,7 @@ export function PurchasesPage({
       return;
     }
 
+    const hadCode = Boolean(draftItem.code.trim());
     const normalizedItem: PurchaseDraftItem = {
       ...draftItem,
       name: draftItem.name.trim(),
@@ -267,7 +453,17 @@ export function PurchasesPage({
     // Keep the last selected category for fast sequential entry of products in the same line
     setDraftItem(createEmptyDraft(brand, normalizedItem.category));
     setDraftUnitCostText('');
-    setTimeout(() => productNameInputRef.current?.focus(), 0);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+    setAutoFilledFromCode(false);
+    setPendingCodeMatch(null);
+    setTimeout(() => {
+      if (hadCode && productCodeInputRef.current) {
+        productCodeInputRef.current.focus();
+      } else {
+        productNameInputRef.current?.focus();
+      }
+    }, 0);
   };
 
   const handleEditAddedItem = (index: number) => {
@@ -276,6 +472,10 @@ export function PurchasesPage({
     setEditingItemIndex(index);
     setDraftItem({ ...target });
     setDraftUnitCostText(target.unitOriginalCost > 0 ? String(target.unitOriginalCost) : '');
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+    setAutoFilledFromCode(false);
+    setPendingCodeMatch(null);
     setErrorMsg(null);
     setTimeout(() => productNameInputRef.current?.focus(), 0);
   };
@@ -284,6 +484,10 @@ export function PurchasesPage({
     setEditingItemIndex(null);
     setDraftItem(createEmptyDraft(brand, draftItem.category));
     setDraftUnitCostText('');
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+    setAutoFilledFromCode(false);
+    setPendingCodeMatch(null);
     setErrorMsg(null);
   };
 
@@ -771,11 +975,27 @@ export function PurchasesPage({
                 {!isLocked && (
                   <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5 space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h3 className="font-display text-xs font-semibold text-zinc-100">
-                        {editingItemIndex !== null
-                          ? `Editando Produto #${editingItemIndex + 1} da Lista`
-                          : 'Adicionar Produto à Lista'}
-                      </h3>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-display text-xs font-semibold text-zinc-100">
+                          {editingItemIndex !== null
+                            ? `Editando Produto #${editingItemIndex + 1} da Lista`
+                            : 'Adicionar Produto à Lista'}
+                        </h3>
+                        {selectedCatalogProduct && (
+                          <span className="inline-flex items-center gap-1 rounded border border-emerald-800/70 bg-emerald-950/50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                            <Check className="h-3 w-3" />
+                            Catálogo: {selectedCatalogProduct.name}
+                            <button
+                              type="button"
+                              onClick={() => handleSelectExistingProduct('')}
+                              title="Desvincular do catálogo"
+                              className="ml-0.5 text-emerald-400 hover:text-emerald-200"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </span>
+                        )}
+                      </div>
                       <span className="text-[11px] text-zinc-400">
                         Subtotal:{' '}
                         <strong className="font-mono-num text-zinc-200">
@@ -784,28 +1004,143 @@ export function PurchasesPage({
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
-                      {products.length > 0 && (
-                        <div className="sm:col-span-3">
-                          <label className="block text-[11px] font-medium text-zinc-400">
-                            Reutilizar Cadastro
-                          </label>
-                          <select
-                            value={draftItem.productId || ''}
-                            onChange={(e) => handleSelectExistingProduct(e.target.value)}
-                            className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
-                          >
-                            <option value="">Novo produto...</option>
-                            {products.map((pr) => (
-                              <option key={pr.id} value={pr.id}>
-                                {pr.brand} · {pr.name} {pr.code ? `(${pr.code})` : ''}
-                              </option>
-                            ))}
-                          </select>
+                    {catalogProductsForBrand.length > 0 && (
+                      <div ref={productDropdownRef} className="relative">
+                        <label className="block text-[11px] font-medium text-zinc-400">
+                          Reutilizar Produto Cadastrado (pesquise por nome ou código)
+                        </label>
+                        <div className="relative mt-0.5">
+                          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                          <input
+                            type="text"
+                            value={productSearch}
+                            onFocus={() => {
+                              setIsProductDropdownOpen(true);
+                              setHighlightedSearchIdx(0);
+                            }}
+                            onChange={(e) => {
+                              setProductSearch(e.target.value);
+                              setIsProductDropdownOpen(true);
+                              setHighlightedSearchIdx(0);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setIsProductDropdownOpen(true);
+                                setHighlightedSearchIdx((prev) =>
+                                  visibleCatalogProducts.length > 0
+                                    ? Math.min(prev + 1, visibleCatalogProducts.length - 1)
+                                    : 0
+                                );
+                              } else if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setHighlightedSearchIdx((prev) => Math.max(prev - 1, 0));
+                              } else if (e.key === 'Enter' && isProductDropdownOpen) {
+                                e.preventDefault();
+                                const picked = visibleCatalogProducts[highlightedSearchIdx];
+                                if (picked) {
+                                  handleSelectExistingProduct(picked.id);
+                                }
+                              } else if (e.key === 'Escape') {
+                                setIsProductDropdownOpen(false);
+                              }
+                            }}
+                            placeholder={`Pesquisar entre ${catalogProductsForBrand.length} produto(s) salvo(s)...`}
+                            className="w-full rounded border border-zinc-700 bg-zinc-900 py-1.5 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                          />
+                          {productSearch && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setProductSearch('');
+                                setHighlightedSearchIdx(0);
+                              }}
+                              aria-label="Limpar busca"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-100"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                         </div>
-                      )}
 
-                      <div className={products.length > 0 ? 'sm:col-span-5' : 'sm:col-span-6'}>
+                        {isProductDropdownOpen && (
+                          <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+                            {visibleCatalogProducts.length === 0 ? (
+                              <div className="px-3 py-3 text-xs text-zinc-400">
+                                Nenhum produto encontrado para &ldquo;{productSearch}&rdquo;. Preencha o código e nome abaixo para cadastrar como novo.
+                              </div>
+                            ) : (
+                              <>
+                                {visibleCatalogProducts.map((pr, idx) => {
+                                  const prevCost =
+                                    lastCostLookup.byProductId.get(pr.id) ??
+                                    (pr.code
+                                      ? lastCostLookup.byCode.get(pr.code.trim().toLowerCase())
+                                      : undefined);
+                                  const isActive = idx === highlightedSearchIdx;
+                                  return (
+                                    <button
+                                      key={pr.id}
+                                      type="button"
+                                      onMouseEnter={() => setHighlightedSearchIdx(idx)}
+                                      onClick={() => handleSelectExistingProduct(pr.id)}
+                                      className={`flex w-full items-center justify-between gap-2 border-b border-zinc-800/70 px-3 py-2 text-left text-xs last:border-b-0 ${
+                                        isActive
+                                          ? 'bg-emerald-950/60 text-zinc-100'
+                                          : 'text-zinc-200 hover:bg-zinc-800/70'
+                                      }`}
+                                    >
+                                      <div className="min-w-0">
+                                        <p className="truncate font-medium">
+                                          {pr.name}
+                                          {pr.code && (
+                                            <span className="font-mono-num ml-1.5 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                                              #{pr.code}
+                                            </span>
+                                          )}
+                                        </p>
+                                        <p className="text-[11px] text-zinc-400">
+                                          {pr.brand} · {pr.category} · Estoque: {pr.availableQty} un.
+                                        </p>
+                                      </div>
+                                      {prevCost !== undefined && (
+                                        <span className="font-mono-num shrink-0 text-[11px] text-zinc-400">
+                                          Últ.: {formatCurrency(prevCost)}
+                                        </span>
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                                {filteredCatalogProducts.length > visibleCatalogProducts.length && (
+                                  <div className="border-t border-zinc-800 bg-zinc-950/60 px-3 py-1.5 text-[11px] text-zinc-400">
+                                    Mostrando {visibleCatalogProducts.length} de{' '}
+                                    {filteredCatalogProducts.length} produtos — digite mais para filtrar.
+                                  </div>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
+                      <div className="sm:col-span-3">
+                        <label className="block text-[11px] font-medium text-zinc-400">
+                          Código (puxa automático)
+                        </label>
+                        <input
+                          ref={productCodeInputRef}
+                          type="text"
+                          value={draftItem.code}
+                          onChange={(e) => handleDraftCodeChange(e.target.value)}
+                          onKeyDown={handleDraftKeyDown}
+                          placeholder="Ex.: 208055"
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-7">
                         <label className="block text-[11px] font-medium text-zinc-400">
                           Nome do Produto *
                         </label>
@@ -813,7 +1148,11 @@ export function PurchasesPage({
                           ref={productNameInputRef}
                           type="text"
                           value={draftItem.name}
-                          onChange={(e) => updateDraftItem({ name: e.target.value })}
+                          onChange={(e) => {
+                            setAutoFilledFromCode(false);
+                            setPendingCodeMatch(null);
+                            updateDraftItem({ name: e.target.value });
+                          }}
                           onKeyDown={handleDraftKeyDown}
                           placeholder="Ex.: Kaiak Clássico 100ml"
                           className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
@@ -821,18 +1160,6 @@ export function PurchasesPage({
                       </div>
 
                       <div className="sm:col-span-2">
-                        <label className="block text-[11px] font-medium text-zinc-400">Código</label>
-                        <input
-                          type="text"
-                          value={draftItem.code}
-                          onChange={(e) => updateDraftItem({ code: e.target.value })}
-                          onKeyDown={handleDraftKeyDown}
-                          placeholder="Opcional"
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
-                        />
-                      </div>
-
-                      <div className={products.length > 0 ? 'sm:col-span-2' : 'sm:col-span-4'}>
                         <label className="block text-[11px] font-medium text-zinc-400">Marca</label>
                         <select
                           value={draftItem.brand}
@@ -845,6 +1172,22 @@ export function PurchasesPage({
                         </select>
                       </div>
                     </div>
+
+                    {pendingCodeMatch && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-800/60 bg-amber-950/30 px-2.5 py-1.5 text-[11px] text-amber-200">
+                        <span>
+                          Código <strong>{pendingCodeMatch.code}</strong> já cadastrado como{' '}
+                          <strong>{pendingCodeMatch.name}</strong> ({pendingCodeMatch.category}).
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => applyCatalogProductToDraft(pendingCodeMatch, true)}
+                          className="rounded bg-amber-600/30 px-2 py-0.5 font-medium text-amber-100 hover:bg-amber-600/50"
+                        >
+                          Puxar dados desse produto
+                        </button>
+                      </div>
+                    )}
 
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-12 sm:items-end">
                       <div className="col-span-2 sm:col-span-3">
@@ -864,7 +1207,7 @@ export function PurchasesPage({
                         </select>
                       </div>
 
-                      <div className="sm:col-span-2">
+                      <div className="sm:col-span-1">
                         <label className="block text-[11px] font-medium text-zinc-400">Qtd.</label>
                         <input
                           type="number"
@@ -872,14 +1215,29 @@ export function PurchasesPage({
                           value={draftItem.quantity}
                           onChange={(e) => updateDraftItem({ quantity: Number(e.target.value) })}
                           onKeyDown={handleDraftKeyDown}
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
 
-                      <div className="sm:col-span-2">
-                        <label className="block text-[11px] font-medium text-zinc-400">
-                          Custo Unit. (R$)
-                        </label>
+                      <div className="sm:col-span-3">
+                        <div className="flex items-center justify-between gap-1 whitespace-nowrap">
+                          <label className="block text-[11px] font-medium text-zinc-400">
+                            Custo Unit. (R$)
+                          </label>
+                          {suggestedLastCost !== null && !draftUnitCostText && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDraftUnitCostText(suggestedLastCost.toFixed(2).replace('.', ','));
+                                updateDraftItem({ unitOriginalCost: suggestedLastCost });
+                              }}
+                              title="Preencher com o último custo registrado"
+                              className="font-mono-num text-[10px] font-medium text-emerald-400 hover:text-emerald-300"
+                            >
+                              Usar {formatCurrency(suggestedLastCost)}
+                            </button>
+                          )}
+                        </div>
                         <input
                           type="text"
                           inputMode="decimal"
@@ -893,7 +1251,11 @@ export function PurchasesPage({
                             });
                           }}
                           onKeyDown={handleDraftKeyDown}
-                          placeholder="0,00"
+                          placeholder={
+                            suggestedLastCost !== null
+                              ? suggestedLastCost.toFixed(2).replace('.', ',')
+                              : '0,00'
+                          }
                           className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>

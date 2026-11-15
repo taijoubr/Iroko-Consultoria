@@ -1,12 +1,17 @@
 import React, { useMemo, useState } from 'react';
 import {
   CalendarClock,
+  Check,
   CheckCircle2,
   Eye,
   FileText,
+  Minus,
   Pencil,
   Plus,
+  Search,
+  ShoppingBag,
   Trash2,
+  X,
 } from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
@@ -86,11 +91,23 @@ export function SalesPage({
 
   // New Sale form state
   const [clientId, setClientId] = useState('');
+  const [clientSearch, setClientSearch] = useState('');
+  const [isClientDropdownOpen, setIsClientDropdownOpen] = useState(false);
+  const [highlightedClientIdx, setHighlightedClientIdx] = useState(0);
+  const clientDropdownRef = React.useRef<HTMLDivElement | null>(null);
+
   const [saleDate, setSaleDate] = useState(getTodayISO());
   const [deliveryStatus, setDeliveryStatus] = useState<DeliveryStatus>('ENTREGUE');
-  const [saleItems, setSaleItems] = useState<{ productId: string; quantity: number }[]>([
-    { productId: '', quantity: 1 },
-  ]);
+  const [saleItems, setSaleItems] = useState<{ productId: string; quantity: number }[]>([]);
+  const [draftProductId, setDraftProductId] = useState('');
+  const [draftQty, setDraftQty] = useState(1);
+  const [productSearch, setProductSearch] = useState('');
+  const [isProductDropdownOpen, setIsProductDropdownOpen] = useState(false);
+  const [highlightedProductIdx, setHighlightedProductIdx] = useState(0);
+  const productDropdownRef = React.useRef<HTMLDivElement | null>(null);
+  const productSearchInputRef = React.useRef<HTMLInputElement | null>(null);
+  const draftQtyInputRef = React.useRef<HTMLInputElement | null>(null);
+
   const [originalSaleAmount, setOriginalSaleAmount] = useState<number>(0);
   const [paymentSplits, setPaymentSplits] = useState<PaymentSplit[]>([
     { method: 'PIX', amount: 0 },
@@ -120,6 +137,25 @@ export function SalesPage({
   const [dueChangeReason, setDueChangeReason] = useState('');
 
   React.useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        productDropdownRef.current &&
+        !productDropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsProductDropdownOpen(false);
+      }
+      if (
+        clientDropdownRef.current &&
+        !clientDropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsClientDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  React.useEffect(() => {
     if (externalOpenNew) {
       openNewSaleModal();
       onClearExternalNew?.();
@@ -131,9 +167,15 @@ export function SalesPage({
     setEditingSale(null);
     setFormError(null);
     setClientId(clients[0]?.id || '');
+    setClientSearch('');
+    setIsClientDropdownOpen(false);
     setSaleDate(getTodayISO());
     setDeliveryStatus('ENTREGUE');
-    setSaleItems([{ productId: products[0]?.id || '', quantity: 1 }]);
+    setSaleItems([]);
+    setDraftProductId('');
+    setDraftQty(1);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
     setOriginalSaleAmount(0);
     setPaymentSplits([{ method: 'PIX', amount: 0 }]);
     setOwnCreditInterestPercent(0);
@@ -156,6 +198,8 @@ export function SalesPage({
     setFormError(null);
     setQuickClientOpen(false);
     setClientId(sale.clientId);
+    setClientSearch('');
+    setIsClientDropdownOpen(false);
     setSaleDate(sale.saleDate);
     setDeliveryStatus(sale.deliveryStatus);
     setSaleItems(
@@ -164,6 +208,10 @@ export function SalesPage({
         quantity: it.quantity,
       }))
     );
+    setDraftProductId('');
+    setDraftQty(1);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
     setOriginalSaleAmount(sale.originalSaleAmount);
     setPaymentSplits(
       sale.paymentSplits.length > 0
@@ -205,36 +253,156 @@ export function SalesPage({
     return map;
   }, [products, editingSale]);
 
-  // Live FIFO Cost Preview (computed automatically; reverts current sale's own lots when editing)
-  const liveCostPreview = useMemo(() => {
-    if (!settings) return { totalCost: 0, error: null as string | null };
-    if (editingSale && !editSaleEligibility.allowed) {
-      return { totalCost: editingSale.totalProductCost, error: null };
+  const normalizeSearch = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+
+  const queuedQtyByProduct = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const it of saleItems) {
+      map.set(it.productId, (map.get(it.productId) || 0) + it.quantity);
     }
-    try {
-      const workingLots = stockLots.map((l) => ({ ...l }));
-      if (editingSale) {
-        for (const oldItem of editingSale.items) {
-          for (const alloc of oldItem.lotAllocations) {
-            if (alloc.lotId) {
-              const wl = workingLots.find((l) => l.id === alloc.lotId);
-              if (wl) {
-                wl.availableQty += alloc.quantity;
-                if (editingSale.deliveryStatus === 'ENTREGUE') {
-                  wl.deliveredQty = Math.max(0, wl.deliveredQty - alloc.quantity);
-                } else {
-                  wl.reservedQty = Math.max(0, wl.reservedQty - alloc.quantity);
-                }
+    return map;
+  }, [saleItems]);
+
+  const filteredClientsForPicker = useMemo(() => {
+    const q = normalizeSearch(clientSearch);
+    const list = clients.filter((c) => {
+      if (!q) return true;
+      return (
+        normalizeSearch(c.fullName).includes(q) ||
+        normalizeSearch(c.whatsapp || '').includes(q) ||
+        normalizeSearch(c.phone || '').includes(q)
+      );
+    });
+    return [...list].sort((a, b) => a.fullName.localeCompare(b.fullName));
+  }, [clients, clientSearch]);
+
+  const selectedClientObj = useMemo(
+    () => clients.find((c) => c.id === clientId) || null,
+    [clients, clientId]
+  );
+
+  const filteredProductsForPicker = useMemo(() => {
+    const q = normalizeSearch(productSearch);
+    const list = products.filter((p) => {
+      if (!q) return true;
+      return (
+        normalizeSearch(p.name).includes(q) ||
+        normalizeSearch(p.code).includes(q) ||
+        normalizeSearch(p.brand).includes(q) ||
+        normalizeSearch(p.category).includes(q)
+      );
+    });
+    return [...list].sort((a, b) => {
+      if (q) {
+        const aCode = normalizeSearch(a.code);
+        const bCode = normalizeSearch(b.code);
+        if (aCode === q && bCode !== q) return -1;
+        if (bCode === q && aCode !== q) return 1;
+        if (aCode.startsWith(q) && !bCode.startsWith(q)) return -1;
+        if (bCode.startsWith(q) && !aCode.startsWith(q)) return 1;
+      }
+      const aRem = (effectiveAvailableByProduct.get(a.id) ?? a.availableQty) - (queuedQtyByProduct.get(a.id) || 0);
+      const bRem = (effectiveAvailableByProduct.get(b.id) ?? b.availableQty) - (queuedQtyByProduct.get(b.id) || 0);
+      if (aRem > 0 && bRem <= 0) return -1;
+      if (bRem > 0 && aRem <= 0) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [products, productSearch, effectiveAvailableByProduct, queuedQtyByProduct]);
+
+  const visibleProductsForPicker = useMemo(
+    () => filteredProductsForPicker.slice(0, 40),
+    [filteredProductsForPicker]
+  );
+
+  const selectedDraftProduct = useMemo(
+    () => products.find((p) => p.id === draftProductId) || null,
+    [products, draftProductId]
+  );
+
+  // Live FIFO evaluation for queued items + single-item preview
+  const liveSaleEvaluation = useMemo(() => {
+    const itemsToEval =
+      saleItems.length > 0
+        ? saleItems
+        : draftProductId && draftQty > 0
+          ? [{ productId: draftProductId, quantity: draftQty }]
+          : [];
+
+    if (!settings) {
+      return {
+        totalCost: 0,
+        totalQty: itemsToEval.reduce((acc, i) => acc + i.quantity, 0),
+        error: null as string | null,
+        evaluatedItems: [] as {
+          productId: string;
+          quantity: number;
+          product: (typeof products)[number] | null;
+          unitCost: number;
+          totalCost: number;
+          error: string | null;
+        }[],
+        draftPreview: { unitCost: 0, totalCost: 0, error: null as string | null },
+      };
+    }
+
+    if (editingSale && !editSaleEligibility.allowed) {
+      return {
+        totalCost: editingSale.totalProductCost,
+        totalQty: editingSale.items.reduce((acc, i) => acc + i.quantity, 0),
+        error: null as string | null,
+        evaluatedItems: editingSale.items.map((it) => ({
+          productId: it.productId,
+          quantity: it.quantity,
+          product: products.find((p) => p.id === it.productId) || null,
+          unitCost: it.unitEffectiveCost,
+          totalCost: it.totalCost,
+          error: null as string | null,
+        })),
+        draftPreview: { unitCost: 0, totalCost: 0, error: null as string | null },
+      };
+    }
+
+    const workingLots = stockLots.map((l) => ({ ...l }));
+    if (editingSale) {
+      for (const oldItem of editingSale.items) {
+        for (const alloc of oldItem.lotAllocations) {
+          if (alloc.lotId) {
+            const wl = workingLots.find((l) => l.id === alloc.lotId);
+            if (wl) {
+              wl.availableQty += alloc.quantity;
+              if (editingSale.deliveryStatus === 'ENTREGUE') {
+                wl.deliveredQty = Math.max(0, wl.deliveredQty - alloc.quantity);
+              } else {
+                wl.reservedQty = Math.max(0, wl.reservedQty - alloc.quantity);
               }
             }
           }
         }
       }
-      let sum = 0;
-      for (const it of saleItems) {
-        if (!it.productId || it.quantity <= 0) continue;
-        const prod = products.find((p) => p.id === it.productId);
-        if (!prod) continue;
+    }
+
+    let sum = 0;
+    let firstError: string | null = null;
+    const evaluatedItems = saleItems.map((it) => {
+      const prod = products.find((p) => p.id === it.productId) || null;
+      if (!prod || it.quantity <= 0) {
+        const err = !prod ? 'Produto não encontrado' : 'Quantidade inválida';
+        if (!firstError) firstError = err;
+        return {
+          productId: it.productId,
+          quantity: it.quantity,
+          product: prod,
+          unitCost: 0,
+          totalCost: 0,
+          error: err,
+        };
+      }
+      try {
         const fifo = allocateFifoFromLots(
           workingLots,
           prod.id,
@@ -247,15 +415,124 @@ export function SalesPage({
           if (wl) wl.availableQty -= a.quantity;
         }
         sum = round2(sum + fifo.totalEffectiveCost);
+        return {
+          productId: it.productId,
+          quantity: it.quantity,
+          product: prod,
+          unitCost: fifo.unitEffectiveCostAvg,
+          totalCost: fifo.totalEffectiveCost,
+          error: null as string | null,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Estoque insuficiente';
+        if (!firstError) firstError = msg;
+        return {
+          productId: it.productId,
+          quantity: it.quantity,
+          product: prod,
+          unitCost: 0,
+          totalCost: 0,
+          error: msg,
+        };
       }
-      return { totalCost: sum, error: null };
-    } catch (err) {
-      return {
-        totalCost: 0,
-        error: err instanceof Error ? err.message : 'Erro no cálculo de estoque',
-      };
+    });
+
+    let draftPreview = { unitCost: 0, totalCost: 0, error: null as string | null };
+    if (draftProductId && draftQty > 0) {
+      const draftProd = products.find((p) => p.id === draftProductId);
+      if (draftProd) {
+        try {
+          const fifo = allocateFifoFromLots(
+            workingLots,
+            draftProd.id,
+            draftProd.name,
+            draftQty,
+            settings.allowNegativeStock
+          );
+          draftPreview = {
+            unitCost: fifo.unitEffectiveCostAvg,
+            totalCost: fifo.totalEffectiveCost,
+            error: null,
+          };
+          if (saleItems.length === 0) {
+            sum = fifo.totalEffectiveCost;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Estoque insuficiente';
+          draftPreview = { unitCost: 0, totalCost: 0, error: msg };
+          if (saleItems.length === 0 && !firstError) {
+            firstError = msg;
+          }
+        }
+      }
     }
-  }, [saleItems, products, stockLots, settings, editingSale, editSaleEligibility.allowed]);
+
+    return {
+      totalCost: sum,
+      totalQty: itemsToEval.reduce((acc, i) => acc + i.quantity, 0),
+      error: firstError,
+      evaluatedItems,
+      draftPreview,
+    };
+  }, [
+    saleItems,
+    draftProductId,
+    draftQty,
+    products,
+    stockLots,
+    settings,
+    editingSale,
+    editSaleEligibility.allowed,
+  ]);
+
+  const liveCostPreview = {
+    totalCost: liveSaleEvaluation.totalCost,
+    error: liveSaleEvaluation.error,
+  };
+
+  const handleSelectProductInComposer = (pickedId: string) => {
+    setDraftProductId(pickedId);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+    setFormError(null);
+    setTimeout(() => draftQtyInputRef.current?.focus(), 0);
+  };
+
+  const handleAddDraftProductToSale = () => {
+    if (!selectedDraftProduct || draftQty <= 0) return;
+    setFormError(null);
+    if (liveSaleEvaluation.draftPreview.error) {
+      setFormError(liveSaleEvaluation.draftPreview.error);
+      return;
+    }
+
+    setSaleItems((prev) => {
+      const idx = prev.findIndex((i) => i.productId === selectedDraftProduct.id);
+      if (idx >= 0) {
+        return prev.map((it, i) =>
+          i === idx ? { ...it, quantity: it.quantity + draftQty } : it
+        );
+      }
+      return [...prev, { productId: selectedDraftProduct.id, quantity: draftQty }];
+    });
+
+    setDraftProductId('');
+    setDraftQty(1);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+    setTimeout(() => productSearchInputRef.current?.focus(), 0);
+  };
+
+  const handleUpdateSaleItemQty = (targetProductId: string, nextQty: number) => {
+    const safeQty = Math.max(1, Math.floor(nextQty || 1));
+    setSaleItems((prev) =>
+      prev.map((it) => (it.productId === targetProductId ? { ...it, quantity: safeQty } : it))
+    );
+  };
+
+  const handleRemoveSaleItem = (targetProductId: string) => {
+    setSaleItems((prev) => prev.filter((it) => it.productId !== targetProductId));
+  };
 
   const ownCreditAmount = useMemo(
     () =>
@@ -382,22 +659,35 @@ export function SalesPage({
     if (!user || !settings) return;
     setFormError(null);
 
-    const selectedClientObj = clients.find((c) => c.id === clientId);
-    if (!selectedClientObj) {
+    const pickedClient = clients.find((c) => c.id === clientId);
+    if (!pickedClient) {
       setFormError('Selecione ou cadastre um cliente antes de registrar a venda.');
       return;
     }
 
-    const validItems = saleItems.filter((i) => i.productId && i.quantity > 0);
+    if (saleItems.length > 0 && draftProductId) {
+      setFormError(
+        `Você selecionou "${selectedDraftProduct?.name || 'um produto'}" acima, mas ainda não clicou em "Adicionar à Lista". Adicione-o à lista ou limpe a seleção antes de confirmar.`
+      );
+      return;
+    }
+
+    const validItems =
+      saleItems.length > 0
+        ? saleItems.filter((i) => i.productId && i.quantity > 0)
+        : draftProductId && draftQty > 0
+          ? [{ productId: draftProductId, quantity: draftQty }]
+          : [];
+
     if (validItems.length === 0) {
-      setFormError('Adicione pelo menos um produto válido do estoque.');
+      setFormError('Adicione pelo menos um produto válido do estoque à lista da venda.');
       return;
     }
 
     setSubmitting(true);
     try {
       const inputPayload = {
-        client: selectedClientObj,
+        client: pickedClient,
         saleDate,
         items: validItems,
         originalSaleAmount,
@@ -810,7 +1100,7 @@ export function SalesPage({
 
           {/* Client, Date, Delivery */}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-            <div className="sm:col-span-2">
+            <div className="sm:col-span-2" ref={clientDropdownRef}>
               <div className="flex items-center justify-between">
                 <label className="block text-xs font-medium text-zinc-300">Cliente *</label>
                 {!(editingSale && !editSaleEligibility.allowed) && (
@@ -823,20 +1113,105 @@ export function SalesPage({
                   </button>
                 )}
               </div>
-              <select
-                required
-                disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
-                value={clientId}
-                onChange={(e) => setClientId(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
-              >
-                <option value="">Selecione um cliente...</option>
-                {clients.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.fullName} {c.whatsapp ? `(${c.whatsapp})` : ''}
-                  </option>
-                ))}
-              </select>
+              <div className="relative mt-1">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                <input
+                  type="text"
+                  disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
+                  value={
+                    isClientDropdownOpen
+                      ? clientSearch
+                      : selectedClientObj
+                        ? `${selectedClientObj.fullName}${selectedClientObj.whatsapp ? ` (${selectedClientObj.whatsapp})` : ''}`
+                        : clientSearch
+                  }
+                  onFocus={() => {
+                    setClientSearch('');
+                    setHighlightedClientIdx(0);
+                    setIsClientDropdownOpen(true);
+                  }}
+                  onChange={(e) => {
+                    setClientSearch(e.target.value);
+                    setHighlightedClientIdx(0);
+                    setIsClientDropdownOpen(true);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      setIsClientDropdownOpen(true);
+                      setHighlightedClientIdx((prev) =>
+                        filteredClientsForPicker.length > 0
+                          ? Math.min(prev + 1, filteredClientsForPicker.length - 1)
+                          : 0
+                      );
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      setHighlightedClientIdx((prev) => Math.max(prev - 1, 0));
+                    } else if (e.key === 'Enter' && isClientDropdownOpen) {
+                      e.preventDefault();
+                      const picked = filteredClientsForPicker[highlightedClientIdx];
+                      if (picked) {
+                        setClientId(picked.id);
+                        setClientSearch('');
+                        setIsClientDropdownOpen(false);
+                      }
+                    } else if (e.key === 'Escape') {
+                      setIsClientDropdownOpen(false);
+                    }
+                  }}
+                  placeholder="Buscar cliente pelo nome ou WhatsApp..."
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 py-2 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
+                />
+                {selectedClientObj && !(editingSale && !editSaleEligibility.allowed) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClientId('');
+                      setClientSearch('');
+                      setIsClientDropdownOpen(true);
+                    }}
+                    aria-label="Trocar cliente"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-100"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+
+                {isClientDropdownOpen && !(editingSale && !editSaleEligibility.allowed) && (
+                  <div className="absolute z-30 mt-1 max-h-52 w-full overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+                    {filteredClientsForPicker.length === 0 ? (
+                      <div className="px-3 py-2.5 text-xs text-zinc-400">
+                        Nenhum cliente encontrado. Use <strong>+ Cadastro rápido</strong> acima.
+                      </div>
+                    ) : (
+                      filteredClientsForPicker.map((c, idx) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onMouseEnter={() => setHighlightedClientIdx(idx)}
+                          onClick={() => {
+                            setClientId(c.id);
+                            setClientSearch('');
+                            setIsClientDropdownOpen(false);
+                          }}
+                          className={`flex w-full items-center justify-between gap-2 border-b border-zinc-800/70 px-3 py-2 text-left text-xs last:border-b-0 ${
+                            idx === highlightedClientIdx
+                              ? 'bg-emerald-950/60 text-zinc-100'
+                              : 'text-zinc-200 hover:bg-zinc-800/70'
+                          }`}
+                        >
+                          <span className="truncate font-medium">{c.fullName}</span>
+                          {c.whatsapp && (
+                            <span className="font-mono-num shrink-0 text-[11px] text-zinc-400">
+                              {c.whatsapp}
+                            </span>
+                          )}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div>
@@ -898,102 +1273,394 @@ export function SalesPage({
             </div>
           )}
 
-          {/* Products */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <h3 className="font-display text-xs font-semibold text-zinc-200">
-                Produtos da Venda
-              </h3>
-              <button
-                type="button"
-                disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
-                onClick={() =>
-                  setSaleItems((prev) => [
-                    ...prev,
-                    { productId: products[0]?.id || '', quantity: 1 },
-                  ])
-                }
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Adicionar Produto
-              </button>
-            </div>
+          {/* Fixed Product Composer + Compact Added Products List */}
+          {(() => {
+            const isLockedSale = Boolean(editingSale && !editSaleEligibility.allowed);
+            const selectedAvail = selectedDraftProduct
+              ? (effectiveAvailableByProduct.get(selectedDraftProduct.id) ??
+                  selectedDraftProduct.availableQty) -
+                (queuedQtyByProduct.get(selectedDraftProduct.id) || 0)
+              : 0;
 
-            {saleItems.map((item, idx) => {
-              const prod = products.find((p) => p.id === item.productId);
-              const isLockedSale = Boolean(editingSale && !editSaleEligibility.allowed);
-              const availQty = prod ? (effectiveAvailableByProduct.get(prod.id) ?? prod.availableQty) : 0;
-              return (
-                <div key={idx} className="grid grid-cols-12 gap-2">
-                  <div className="col-span-12 sm:col-span-9">
-                    <select
-                      required
-                      disabled={isLockedSale}
-                      value={item.productId}
-                      onChange={(e) =>
-                        setSaleItems((prev) =>
-                          prev.map((it, i) =>
-                            i === idx ? { ...it, productId: e.target.value } : it
-                          )
-                        )
-                      }
-                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 disabled:opacity-50"
-                    >
-                      <option value="">Selecione um produto do estoque...</option>
-                      {products.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.brand} · {p.name} {p.code ? `(${p.code})` : ''} — Disp.:{' '}
-                          {effectiveAvailableByProduct.get(p.id) ?? p.availableQty} un.
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="col-span-9 sm:col-span-2">
-                    <input
-                      type="number"
-                      min={1}
-                      required
-                      disabled={isLockedSale}
-                      value={item.quantity}
-                      onChange={(e) =>
-                        setSaleItems((prev) =>
-                          prev.map((it, i) =>
-                            i === idx ? { ...it, quantity: Math.max(1, Number(e.target.value)) } : it
-                          )
-                        )
-                      }
-                      aria-label="Quantidade"
-                      className="font-mono-num w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 disabled:opacity-50"
-                    />
-                    {prod && (
-                      <span className="block pt-0.5 text-[10px] text-zinc-500">
-                        Disp: {availQty}
-                      </span>
+            return (
+              <div className="space-y-3">
+                {!isLockedSale && (
+                  <div className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="font-display text-xs font-semibold text-zinc-100">
+                        Adicionar Produto à Venda
+                      </h3>
+                      {selectedDraftProduct && (
+                        <span className="inline-flex items-center gap-1 rounded border border-emerald-800/70 bg-emerald-950/50 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                          <Check className="h-3 w-3" />
+                          {selectedDraftProduct.name}
+                          {selectedDraftProduct.code ? ` (#${selectedDraftProduct.code})` : ''} · Disp.:{' '}
+                          {selectedAvail} un.
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDraftProductId('');
+                              setProductSearch('');
+                              productSearchInputRef.current?.focus();
+                            }}
+                            aria-label="Limpar produto selecionado"
+                            className="ml-1 text-emerald-400 hover:text-emerald-200"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-12 sm:items-end">
+                      <div ref={productDropdownRef} className="relative sm:col-span-7">
+                        <label className="block text-[11px] font-medium text-zinc-400">
+                          Buscar Produto do Estoque (nome ou código)
+                        </label>
+                        <div className="relative mt-0.5">
+                          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                          <input
+                            ref={productSearchInputRef}
+                            type="text"
+                            value={
+                              isProductDropdownOpen
+                                ? productSearch
+                                : selectedDraftProduct
+                                  ? `${selectedDraftProduct.brand} · ${selectedDraftProduct.name}${selectedDraftProduct.code ? ` (#${selectedDraftProduct.code})` : ''}`
+                                  : productSearch
+                            }
+                            onFocus={() => {
+                              setHighlightedProductIdx(0);
+                              setIsProductDropdownOpen(true);
+                            }}
+                            onChange={(e) => {
+                              const nextVal = e.target.value;
+                              setProductSearch(nextVal);
+                              if (selectedDraftProduct) setDraftProductId('');
+                              setHighlightedProductIdx(0);
+                              setIsProductDropdownOpen(true);
+
+                              const norm = normalizeSearch(nextVal);
+                              if (norm) {
+                                const exactCodeMatch = products.find(
+                                  (p) => normalizeSearch(p.code) === norm
+                                );
+                                if (exactCodeMatch) {
+                                  handleSelectProductInComposer(exactCodeMatch.id);
+                                }
+                              }
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setIsProductDropdownOpen(true);
+                                setHighlightedProductIdx((prev) =>
+                                  visibleProductsForPicker.length > 0
+                                    ? Math.min(prev + 1, visibleProductsForPicker.length - 1)
+                                    : 0
+                                );
+                              } else if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setHighlightedProductIdx((prev) => Math.max(prev - 1, 0));
+                              } else if (e.key === 'Enter') {
+                                e.preventDefault();
+                                if (isProductDropdownOpen) {
+                                  const picked = visibleProductsForPicker[highlightedProductIdx];
+                                  if (picked) {
+                                    handleSelectProductInComposer(picked.id);
+                                  }
+                                } else if (selectedDraftProduct) {
+                                  handleAddDraftProductToSale();
+                                }
+                              } else if (e.key === 'Escape') {
+                                setIsProductDropdownOpen(false);
+                              }
+                            }}
+                            placeholder={`Pesquisar entre ${products.length} produto(s) por nome ou código...`}
+                            className="w-full rounded border border-zinc-700 bg-zinc-900 py-1.5 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                          />
+                          {(productSearch || selectedDraftProduct) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setProductSearch('');
+                                setDraftProductId('');
+                                setHighlightedProductIdx(0);
+                                productSearchInputRef.current?.focus();
+                              }}
+                              aria-label="Limpar busca de produto"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-100"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+
+                        {isProductDropdownOpen && (
+                          <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+                            {visibleProductsForPicker.length === 0 ? (
+                              <div className="px-3 py-3 text-xs text-zinc-400">
+                                Nenhum produto encontrado para &ldquo;{productSearch}&rdquo;.
+                              </div>
+                            ) : (
+                              <>
+                                {visibleProductsForPicker.map((pr, idx) => {
+                                  const remaining =
+                                    (effectiveAvailableByProduct.get(pr.id) ?? pr.availableQty) -
+                                    (queuedQtyByProduct.get(pr.id) || 0);
+                                  const isActive = idx === highlightedProductIdx;
+                                  return (
+                                    <button
+                                      key={pr.id}
+                                      type="button"
+                                      onMouseEnter={() => setHighlightedProductIdx(idx)}
+                                      onClick={() => handleSelectProductInComposer(pr.id)}
+                                      className={`flex w-full items-center justify-between gap-2 border-b border-zinc-800/70 px-3 py-2 text-left text-xs last:border-b-0 ${
+                                        isActive
+                                          ? 'bg-emerald-950/60 text-zinc-100'
+                                          : 'text-zinc-200 hover:bg-zinc-800/70'
+                                      }`}
+                                    >
+                                      <div className="min-w-0">
+                                        <p className="truncate font-medium">
+                                          {pr.name}
+                                          {pr.code && (
+                                            <span className="font-mono-num ml-1.5 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                                              #{pr.code}
+                                            </span>
+                                          )}
+                                        </p>
+                                        <p className="text-[11px] text-zinc-400">
+                                          {pr.brand} · {pr.category}
+                                        </p>
+                                      </div>
+                                      <span
+                                        className={`font-mono-num shrink-0 text-[11px] font-medium ${
+                                          remaining > 0 ? 'text-emerald-400' : 'text-red-400'
+                                        }`}
+                                      >
+                                        Disp.: {remaining} un.
+                                      </span>
+                                    </button>
+                                  );
+                                })}
+                                {filteredProductsForPicker.length >
+                                  visibleProductsForPicker.length && (
+                                  <div className="border-t border-zinc-800 bg-zinc-950/60 px-3 py-1.5 text-[11px] text-zinc-400">
+                                    Mostrando {visibleProductsForPicker.length} de{' '}
+                                    {filteredProductsForPicker.length} produtos — digite mais para filtrar.
+                                  </div>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="sm:col-span-2">
+                        <label className="block text-[11px] font-medium text-zinc-400">
+                          Quantidade
+                        </label>
+                        <input
+                          ref={draftQtyInputRef}
+                          type="number"
+                          min={1}
+                          value={draftQty}
+                          onChange={(e) => setDraftQty(Math.max(1, Number(e.target.value)))}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleAddDraftProductToSale();
+                            }
+                          }}
+                          aria-label="Quantidade"
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-3">
+                        <button
+                          type="button"
+                          onClick={handleAddDraftProductToSale}
+                          disabled={
+                            !selectedDraftProduct || Boolean(liveSaleEvaluation.draftPreview.error)
+                          }
+                          className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          Adicionar à Lista
+                        </button>
+                      </div>
+                    </div>
+
+                    {selectedDraftProduct && !liveSaleEvaluation.draftPreview.error && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
+                        <span>
+                          Custo FIFO unit.:{' '}
+                          <strong className="font-mono-num text-zinc-200">
+                            {formatCurrency(liveSaleEvaluation.draftPreview.unitCost)}
+                          </strong>
+                        </span>
+                        <span>
+                          Subtotal FIFO:{' '}
+                          <strong className="font-mono-num text-zinc-100">
+                            {formatCurrency(liveSaleEvaluation.draftPreview.totalCost)}
+                          </strong>
+                        </span>
+                      </div>
+                    )}
+
+                    {selectedDraftProduct && liveSaleEvaluation.draftPreview.error && (
+                      <p className="text-[11px] font-medium text-red-400">
+                        {liveSaleEvaluation.draftPreview.error}
+                      </p>
                     )}
                   </div>
-                  <div className="col-span-3 flex items-start justify-end pt-1 sm:col-span-1">
-                    <button
-                      type="button"
-                      disabled={isLockedSale || saleItems.length === 1}
-                      onClick={() =>
-                        setSaleItems((prev) =>
-                          prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev
-                        )
-                      }
-                      className="rounded p-1.5 text-zinc-500 hover:bg-red-950/60 hover:text-red-400 disabled:opacity-30"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                )}
 
-            {liveCostPreview.error && (
-              <p className="text-xs font-medium text-red-400">{liveCostPreview.error}</p>
-            )}
-          </div>
+                {/* Added Sale Items List */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-200">
+                      <ShoppingBag className="h-4 w-4 text-emerald-400" />
+                      <span>
+                        Lista de Produtos da Venda ({saleItems.length}{' '}
+                        {saleItems.length === 1 ? 'item' : 'itens'})
+                      </span>
+                    </div>
+                    {saleItems.length > 0 && (
+                      <div className="flex items-center gap-3 text-[11px]">
+                        <span className="font-mono-num text-zinc-400">
+                          {saleItems.reduce((acc, it) => acc + it.quantity, 0)} un. no total
+                        </span>
+                        {!isLockedSale && (
+                          <button
+                            type="button"
+                            onClick={() => setSaleItems([])}
+                            className="text-zinc-400 hover:text-red-400"
+                          >
+                            Limpar lista
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {saleItems.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/40 px-4 py-4 text-center text-xs text-zinc-500">
+                      Nenhum produto na lista ainda. Busque acima por nome ou código e clique em{' '}
+                      <strong className="text-zinc-300">Adicionar à Lista</strong> (ou selecione 1 produto e confirme diretamente).
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-zinc-800/80 rounded-lg border border-zinc-800 bg-zinc-950/60">
+                      {liveSaleEvaluation.evaluatedItems.map((item) => {
+                        const prod = item.product;
+                        const availQty = prod
+                          ? effectiveAvailableByProduct.get(prod.id) ?? prod.availableQty
+                          : 0;
+                        return (
+                          <div
+                            key={item.productId}
+                            className={`flex flex-col gap-2 px-3 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between ${
+                              item.error ? 'bg-red-950/20' : ''
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <p className="truncate font-medium text-zinc-100">
+                                {prod?.name || 'Produto não encontrado'}
+                                {prod?.code && (
+                                  <span className="font-mono-num ml-1.5 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                                    #{prod.code}
+                                  </span>
+                                )}
+                              </p>
+                              <p className="text-[11px] text-zinc-400">
+                                {prod?.brand} · {prod?.category} · Disp.: {availQty} un. · Custo FIFO:{' '}
+                                <strong className="font-mono-num text-zinc-200">
+                                  {formatCurrency(item.totalCost)}
+                                </strong>{' '}
+                                <span className="font-mono-num text-zinc-500">
+                                  ({formatCurrency(item.unitCost)}/un.)
+                                </span>
+                              </p>
+                              {item.error && (
+                                <p className="mt-0.5 text-[11px] font-medium text-red-400">
+                                  {item.error}
+                                </p>
+                              )}
+                            </div>
+
+                            {isLockedSale ? (
+                              <span className="font-mono-num shrink-0 font-semibold text-zinc-200">
+                                {item.quantity} un.
+                              </span>
+                            ) : (
+                              <div className="flex shrink-0 items-center gap-1 self-end sm:self-auto">
+                                <button
+                                  type="button"
+                                  disabled={item.quantity <= 1}
+                                  onClick={() =>
+                                    handleUpdateSaleItemQty(
+                                      item.productId,
+                                      Math.max(1, item.quantity - 1)
+                                    )
+                                  }
+                                  aria-label="Diminuir quantidade"
+                                  className="rounded border border-zinc-700 bg-zinc-900 p-1 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                                >
+                                  <Minus className="h-3 w-3" />
+                                </button>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={item.quantity}
+                                  onChange={(e) =>
+                                    handleUpdateSaleItemQty(item.productId, Number(e.target.value))
+                                  }
+                                  aria-label="Quantidade do item"
+                                  className="font-mono-num w-12 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-center text-xs text-zinc-100"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateSaleItemQty(item.productId, item.quantity + 1)
+                                  }
+                                  aria-label="Aumentar quantidade"
+                                  className="rounded border border-zinc-700 bg-zinc-900 p-1 text-zinc-300 hover:bg-zinc-800"
+                                >
+                                  <Plus className="h-3 w-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveSaleItem(item.productId)}
+                                  aria-label="Remover item da venda"
+                                  title="Remover da lista"
+                                  className="ml-1 rounded p-1 text-zinc-500 hover:bg-red-950/60 hover:text-red-400"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {!isLockedSale && saleItems.length > 0 && selectedDraftProduct && (
+                    <p className="text-[11px] text-amber-400">
+                      Você selecionou &ldquo;{selectedDraftProduct.name}&rdquo; acima. Clique em{' '}
+                      <strong>Adicionar à Lista</strong> para incluí-lo nesta venda.
+                    </p>
+                  )}
+
+                  {liveCostPreview.error && saleItems.length > 0 && (
+                    <p className="text-xs font-medium text-red-400">{liveCostPreview.error}</p>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Final Sale Value & Automatic Profit Display */}
           <div className="grid grid-cols-1 gap-3 rounded-xl border border-zinc-800 bg-zinc-950/70 p-4 sm:grid-cols-3">

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Coffee, Minus, Plus, ShoppingBasket, Trash2 } from 'lucide-react';
+import { Check, Coffee, Minus, Plus, Search, ShoppingBasket, Trash2, X } from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
 import {
@@ -20,6 +20,13 @@ export function PersonalConsumptionPage() {
     useAppData();
 
   const [productId, setProductId] = useState('');
+  const [productSearch, setProductSearch] = useState('');
+  const [isProductDropdownOpen, setIsProductDropdownOpen] = useState(false);
+  const [highlightedIdx, setHighlightedIdx] = useState(0);
+  const productDropdownRef = React.useRef<HTMLDivElement | null>(null);
+  const productSearchInputRef = React.useRef<HTMLInputElement | null>(null);
+  const quantityInputRef = React.useRef<HTMLInputElement | null>(null);
+
   const [quantity, setQuantity] = useState(1);
   const [date, setDate] = useState(getTodayISO());
   const [notes, setNotes] = useState('');
@@ -30,6 +37,26 @@ export function PersonalConsumptionPage() {
   const [deleteTarget, setDeleteTarget] = useState<PersonalConsumption | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        productDropdownRef.current &&
+        !productDropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsProductDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const normalizeSearch = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
 
   const selectedProduct = useMemo(
     () => products.find((p) => p.id === productId) || null,
@@ -148,6 +175,47 @@ export function PersonalConsumptionPage() {
     [personalConsumptions]
   );
 
+  const filteredProductsForPicker = useMemo(() => {
+    const q = normalizeSearch(productSearch);
+    const list = products.filter((p) => {
+      if (!q) return true;
+      return (
+        normalizeSearch(p.name).includes(q) ||
+        normalizeSearch(p.code).includes(q) ||
+        normalizeSearch(p.brand).includes(q) ||
+        normalizeSearch(p.category).includes(q)
+      );
+    });
+    return [...list].sort((a, b) => {
+      if (q) {
+        const aCode = normalizeSearch(a.code);
+        const bCode = normalizeSearch(b.code);
+        if (aCode === q && bCode !== q) return -1;
+        if (bCode === q && aCode !== q) return 1;
+        if (aCode.startsWith(q) && !bCode.startsWith(q)) return -1;
+        if (bCode.startsWith(q) && !aCode.startsWith(q)) return 1;
+      }
+      const aRem = a.availableQty - (listEvaluation.queuedQtyByProduct.get(a.id) || 0);
+      const bRem = b.availableQty - (listEvaluation.queuedQtyByProduct.get(b.id) || 0);
+      if (aRem > 0 && bRem <= 0) return -1;
+      if (bRem > 0 && aRem <= 0) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [products, productSearch, listEvaluation.queuedQtyByProduct]);
+
+  const visibleProductsForPicker = useMemo(
+    () => filteredProductsForPicker.slice(0, 40),
+    [filteredProductsForPicker]
+  );
+
+  const handleSelectPickerProduct = (pickedId: string) => {
+    setProductId(pickedId);
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
+    setErrorMsg(null);
+    setTimeout(() => quantityInputRef.current?.focus(), 0);
+  };
+
   const handleAddToList = () => {
     if (!selectedProduct || quantity <= 0) return;
     setErrorMsg(null);
@@ -169,7 +237,10 @@ export function PersonalConsumptionPage() {
     });
 
     setProductId('');
+    setProductSearch('');
+    setIsProductDropdownOpen(false);
     setQuantity(1);
+    setTimeout(() => productSearchInputRef.current?.focus(), 0);
   };
 
   const handleUpdateDraftQty = (targetProductId: string, nextQty: number) => {
@@ -318,43 +389,188 @@ export function PersonalConsumptionPage() {
 
           {/* Product Picker + Add to List */}
           <div className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950/60 p-3.5">
-            <h3 className="text-xs font-semibold text-zinc-200">Adicionar Produto à Lista</h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-xs font-semibold text-zinc-200">Adicionar Produto à Lista</h3>
+              {selectedProduct && (
+                <span className="inline-flex items-center gap-1 rounded border border-emerald-800/70 bg-emerald-950/50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                  <Check className="h-3 w-3" />
+                  {selectedProduct.name}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProductId('');
+                      setProductSearch('');
+                      productSearchInputRef.current?.focus();
+                    }}
+                    aria-label="Limpar produto"
+                    className="ml-0.5 text-emerald-400 hover:text-emerald-200"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              )}
+            </div>
 
-            <div>
+            <div ref={productDropdownRef} className="relative">
               <label className="block text-[11px] font-medium text-zinc-400">
-                Produto do Estoque
+                Buscar Produto do Estoque (nome ou código)
               </label>
-              <select
-                required={draftList.length === 0}
-                value={productId}
-                onChange={(e) => {
-                  setProductId(e.target.value);
-                  setErrorMsg(null);
-                }}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
-              >
-                <option value="">Selecione um produto...</option>
-                {products.map((p) => {
-                  const queued = listEvaluation.queuedQtyByProduct.get(p.id) || 0;
-                  const remaining = p.availableQty - queued;
-                  return (
-                    <option key={p.id} value={p.id}>
-                      {p.brand} · {p.name} (Disp.: {remaining} un.{queued > 0 ? `, ${queued} na lista` : ''})
-                    </option>
-                  );
-                })}
-              </select>
+              <div className="relative mt-1">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                <input
+                  ref={productSearchInputRef}
+                  type="text"
+                  value={
+                    isProductDropdownOpen
+                      ? productSearch
+                      : selectedProduct
+                        ? `${selectedProduct.brand} · ${selectedProduct.name}${selectedProduct.code ? ` (#${selectedProduct.code})` : ''}`
+                        : productSearch
+                  }
+                  onFocus={() => {
+                    setHighlightedIdx(0);
+                    setIsProductDropdownOpen(true);
+                  }}
+                  onChange={(e) => {
+                    const nextVal = e.target.value;
+                    setProductSearch(nextVal);
+                    if (selectedProduct) setProductId('');
+                    setHighlightedIdx(0);
+                    setIsProductDropdownOpen(true);
+                    setErrorMsg(null);
+
+                    const norm = normalizeSearch(nextVal);
+                    if (norm) {
+                      const exactCodeMatch = products.find(
+                        (p) => normalizeSearch(p.code) === norm
+                      );
+                      if (exactCodeMatch) {
+                        handleSelectPickerProduct(exactCodeMatch.id);
+                      }
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      setIsProductDropdownOpen(true);
+                      setHighlightedIdx((prev) =>
+                        visibleProductsForPicker.length > 0
+                          ? Math.min(prev + 1, visibleProductsForPicker.length - 1)
+                          : 0
+                      );
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      setHighlightedIdx((prev) => Math.max(prev - 1, 0));
+                    } else if (e.key === 'Enter') {
+                      e.preventDefault();
+                      if (isProductDropdownOpen) {
+                        const picked = visibleProductsForPicker[highlightedIdx];
+                        if (picked) {
+                          handleSelectPickerProduct(picked.id);
+                        }
+                      } else if (selectedProduct) {
+                        handleAddToList();
+                      }
+                    } else if (e.key === 'Escape') {
+                      setIsProductDropdownOpen(false);
+                    }
+                  }}
+                  placeholder={`Pesquisar entre ${products.length} produto(s) por nome ou código...`}
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-2 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                />
+                {(productSearch || selectedProduct) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProductSearch('');
+                      setProductId('');
+                      setHighlightedIdx(0);
+                      productSearchInputRef.current?.focus();
+                    }}
+                    aria-label="Limpar busca"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-100"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {isProductDropdownOpen && (
+                <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+                  {visibleProductsForPicker.length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-zinc-400">
+                      Nenhum produto encontrado para &ldquo;{productSearch}&rdquo;.
+                    </div>
+                  ) : (
+                    <>
+                      {visibleProductsForPicker.map((p, idx) => {
+                        const queued = listEvaluation.queuedQtyByProduct.get(p.id) || 0;
+                        const remaining = p.availableQty - queued;
+                        const isActive = idx === highlightedIdx;
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onMouseEnter={() => setHighlightedIdx(idx)}
+                            onClick={() => handleSelectPickerProduct(p.id)}
+                            className={`flex w-full items-center justify-between gap-2 border-b border-zinc-800/70 px-3 py-2 text-left text-xs last:border-b-0 ${
+                              isActive
+                                ? 'bg-emerald-950/60 text-zinc-100'
+                                : 'text-zinc-200 hover:bg-zinc-800/70'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <p className="truncate font-medium">
+                                {p.name}
+                                {p.code && (
+                                  <span className="font-mono-num ml-1.5 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                                    #{p.code}
+                                  </span>
+                                )}
+                              </p>
+                              <p className="text-[11px] text-zinc-400">
+                                {p.brand} · {p.category}
+                                {queued > 0 ? ` · ${queued} na lista` : ''}
+                              </p>
+                            </div>
+                            <span
+                              className={`font-mono-num shrink-0 text-[11px] font-medium ${
+                                remaining > 0 ? 'text-emerald-400' : 'text-red-400'
+                              }`}
+                            >
+                              Disp.: {remaining} un.
+                            </span>
+                          </button>
+                        );
+                      })}
+                      {filteredProductsForPicker.length > visibleProductsForPicker.length && (
+                        <div className="border-t border-zinc-800 bg-zinc-950/60 px-3 py-1.5 text-[11px] text-zinc-400">
+                          Mostrando {visibleProductsForPicker.length} de{' '}
+                          {filteredProductsForPicker.length} produtos — digite mais para filtrar.
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
               <div className="w-full sm:w-28">
                 <label className="block text-[11px] font-medium text-zinc-400">Quantidade</label>
                 <input
+                  ref={quantityInputRef}
                   type="number"
                   min={1}
                   required={draftList.length === 0}
                   value={quantity}
                   onChange={(e) => setQuantity(Math.max(1, Number(e.target.value)))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddToList();
+                    }
+                  }}
                   className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
                 />
               </div>
