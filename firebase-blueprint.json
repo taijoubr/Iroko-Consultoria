@@ -550,6 +550,35 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "Seller": {
+      "title": "Seller",
+      "description": "Cadastro de vendedor(a) comissionado(a) com percentual padrão e dados de repasse.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "whatsapp": { "type": "string", "maxLength": 32 },
+        "pixKey": { "type": "string", "maxLength": 120 },
+        "defaultCommissionPercent": { "type": "number" },
+        "active": { "type": "boolean" },
+        "notes": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerId",
+        "fullName",
+        "phone",
+        "whatsapp",
+        "pixKey",
+        "defaultCommissionPercent",
+        "active",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -608,6 +637,10 @@
     "/commissions/{commissionId}": {
       "schema": { "$ref": "#/entities/Commission" },
       "description": "Comissões de vendedores sincronizadas com Contas a Pagar."
+    },
+    "/sellers/{sellerId}": {
+      "schema": { "$ref": "#/entities/Seller" },
+      "description": "Cadastro de vendedores comissionados."
     }
   }
 }

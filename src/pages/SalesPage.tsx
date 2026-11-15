@@ -24,6 +24,7 @@ import {
   registerReceivablePayment,
   registerSale,
   saveClient,
+  saveSeller,
   updateReceivableDueDate,
   updateSale,
 } from '../services/firestoreOperations';
@@ -70,6 +71,7 @@ export function SalesPage({
     payments,
     cardSettlements,
     commissions,
+    sellers,
   } = useAppData();
 
   const [statusFilter, setStatusFilter] = useState<
@@ -126,11 +128,18 @@ export function SalesPage({
   const [customDueDates, setCustomDueDates] = useState<string[]>([]);
   const [notes, setNotes] = useState('');
   const [hasCommission, setHasCommission] = useState(false);
+  const [commSellerId, setCommSellerId] = useState('');
   const [commSellerName, setCommSellerName] = useState('');
   const [commSellerContact, setCommSellerContact] = useState('');
   const [commPercent, setCommPercent] = useState<number>(10);
   const [commAmount, setCommAmount] = useState<number>(0);
   const [commDueDate, setCommDueDate] = useState(getTodayISO());
+  const [quickSellerOpen, setQuickSellerOpen] = useState(false);
+  const [quickSellerName, setQuickSellerName] = useState('');
+  const [quickSellerWhatsapp, setQuickSellerWhatsapp] = useState('');
+  const [quickSellerPix, setQuickSellerPix] = useState('');
+  const [quickSellerPct, setQuickSellerPct] = useState<number>(10);
+  const [savingQuickSeller, setSavingQuickSeller] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -195,11 +204,13 @@ export function SalesPage({
     setCustomDueDates([]);
     setNotes('');
     setHasCommission(false);
+    setCommSellerId('');
     setCommSellerName('');
     setCommSellerContact('');
     setCommPercent(10);
     setCommAmount(0);
     setCommDueDate(getTodayISO());
+    setQuickSellerOpen(false);
     setShowNewModal(true);
   };
 
@@ -247,11 +258,13 @@ export function SalesPage({
     );
     setNotes(sale.notes || '');
     setHasCommission(false);
+    setCommSellerId('');
     setCommSellerName('');
     setCommSellerContact('');
     setCommPercent(10);
     setCommAmount(0);
     setCommDueDate(sale.saleDate);
+    setQuickSellerOpen(false);
     setSelectedSaleId(null);
     setShowNewModal(true);
   };
@@ -2133,99 +2146,220 @@ export function SalesPage({
               </label>
 
               {hasCommission && (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-4 pt-1">
-                  <div className="sm:col-span-2">
-                    <label className="block text-[11px] font-medium text-zinc-300">
-                      Vendedor(a) *
-                    </label>
-                    <input
-                      type="text"
-                      list="sale-commission-sellers"
-                      value={commSellerName}
+                <div className="space-y-3 pt-1">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-[11px] font-medium text-zinc-300">
+                        Vendedor(a) Cadastrado(a)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setQuickSellerOpen((v) => !v)}
+                        className="text-[11px] font-medium text-emerald-400 hover:underline"
+                      >
+                        {quickSellerOpen ? 'Fechar cadastro rápido' : '+ Cadastrar novo vendedor'}
+                      </button>
+                    </div>
+                    <select
+                      value={commSellerId}
                       onChange={(e) => {
-                        const val = e.target.value;
-                        setCommSellerName(val);
-                        const match = commissions.find(
-                          (c) => c.sellerName.toLowerCase() === val.trim().toLowerCase() && c.sellerContact
-                        );
-                        if (match && !commSellerContact) {
-                          setCommSellerContact(match.sellerContact);
+                        const sid = e.target.value;
+                        setCommSellerId(sid);
+                        const found = sellers.find((s) => s.id === sid);
+                        if (found) {
+                          setCommSellerName(found.fullName);
+                          const cParts: string[] = [];
+                          if (found.whatsapp.trim()) cParts.push(`WhatsApp: ${found.whatsapp.trim()}`);
+                          else if (found.phone.trim()) cParts.push(`Tel: ${found.phone.trim()}`);
+                          if (found.pixKey.trim()) cParts.push(`PIX: ${found.pixKey.trim()}`);
+                          setCommSellerContact(cParts.join(' · ').slice(0, 120));
+                          const pct = found.defaultCommissionPercent ?? 10;
+                          setCommPercent(pct);
+                          if (originalSaleAmount > 0 && pct > 0) {
+                            setCommAmount(round2((originalSaleAmount * pct) / 100));
+                          }
                         }
                       }}
-                      placeholder="Nome de quem vendeu"
-                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
-                    />
-                    <datalist id="sale-commission-sellers">
-                      {Array.from(new Set(commissions.map((c) => c.sellerName))).map((name) => (
-                        <option key={name} value={name} />
-                      ))}
-                    </datalist>
+                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                    >
+                      <option value="">
+                        {sellers.some((s) => s.active)
+                          ? 'Selecionar vendedor cadastrado (ou digitar abaixo)...'
+                          : 'Nenhum vendedor cadastrado — digite abaixo ou cadastre acima'}
+                      </option>
+                      {sellers
+                        .filter((s) => s.active || s.id === commSellerId)
+                        .sort((a, b) => a.fullName.localeCompare(b.fullName))
+                        .map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.fullName} ({formatPercent(s.defaultCommissionPercent)})
+                          </option>
+                        ))}
+                    </select>
+
+                    {quickSellerOpen && (
+                      <div className="rounded-lg border border-emerald-800/50 bg-emerald-950/20 p-2.5 space-y-2">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          <input
+                            type="text"
+                            value={quickSellerName}
+                            onChange={(e) => setQuickSellerName(e.target.value)}
+                            placeholder="Nome completo *"
+                            className="rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-xs text-zinc-100 placeholder:text-zinc-500"
+                          />
+                          <input
+                            type="text"
+                            value={quickSellerWhatsapp}
+                            onChange={(e) => setQuickSellerWhatsapp(e.target.value)}
+                            placeholder="WhatsApp"
+                            className="rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-xs text-zinc-100 placeholder:text-zinc-500"
+                          />
+                          <input
+                            type="text"
+                            value={quickSellerPix}
+                            onChange={(e) => setQuickSellerPix(e.target.value)}
+                            placeholder="Chave PIX (opcional)"
+                            className="rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-xs text-zinc-100 placeholder:text-zinc-500"
+                          />
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] text-zinc-400 shrink-0">Comissão %:</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              step="0.1"
+                              value={quickSellerPct}
+                              onChange={(e) => setQuickSellerPct(Number(e.target.value))}
+                              className="font-mono-num w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            disabled={savingQuickSeller || !quickSellerName.trim() || !user}
+                            onClick={async () => {
+                              if (!user || !quickSellerName.trim()) return;
+                              setSavingQuickSeller(true);
+                              try {
+                                const newId = await saveSeller(user.uid, {
+                                  fullName: quickSellerName,
+                                  phone: '',
+                                  whatsapp: quickSellerWhatsapp,
+                                  pixKey: quickSellerPix,
+                                  defaultCommissionPercent: quickSellerPct,
+                                  active: true,
+                                  notes: '',
+                                });
+                                setCommSellerId(newId);
+                                setCommSellerName(quickSellerName.trim());
+                                const cParts: string[] = [];
+                                if (quickSellerWhatsapp.trim()) cParts.push(`WhatsApp: ${quickSellerWhatsapp.trim()}`);
+                                if (quickSellerPix.trim()) cParts.push(`PIX: ${quickSellerPix.trim()}`);
+                                setCommSellerContact(cParts.join(' · ').slice(0, 120));
+                                setCommPercent(quickSellerPct);
+                                if (originalSaleAmount > 0 && quickSellerPct > 0) {
+                                  setCommAmount(round2((originalSaleAmount * quickSellerPct) / 100));
+                                }
+                                setQuickSellerName('');
+                                setQuickSellerWhatsapp('');
+                                setQuickSellerPix('');
+                                setQuickSellerOpen(false);
+                              } finally {
+                                setSavingQuickSeller(false);
+                              }
+                            }}
+                            className="rounded bg-emerald-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                          >
+                            {savingQuickSeller ? 'Salvando...' : 'Salvar e Selecionar'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
-                  <div>
-                    <label className="block text-[11px] font-medium text-zinc-300">
-                      Comissão (%)
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      max={100}
-                      step="0.1"
-                      value={commPercent || ''}
-                      onChange={(e) => {
-                        const pct = Number(e.target.value);
-                        setCommPercent(pct);
-                        if (originalSaleAmount > 0) {
-                          setCommAmount(round2((originalSaleAmount * pct) / 100));
-                        }
-                      }}
-                      className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
-                    />
-                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-medium text-zinc-300">
+                        Nome do(a) Vendedor(a) *
+                      </label>
+                      <input
+                        type="text"
+                        value={commSellerName}
+                        onChange={(e) => {
+                          setCommSellerName(e.target.value);
+                          setCommSellerId('');
+                        }}
+                        placeholder="Nome de quem vendeu"
+                        className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                      />
+                    </div>
 
-                  <div>
-                    <label className="block text-[11px] font-medium text-zinc-300">
-                      Valor Comissão (R$) *
-                    </label>
-                    <input
-                      type="number"
-                      min={0.01}
-                      step="0.01"
-                      value={commAmount || ''}
-                      onChange={(e) => {
-                        const val = Number(e.target.value);
-                        setCommAmount(val);
-                        if (originalSaleAmount > 0 && val >= 0) {
-                          setCommPercent(round2((val / originalSaleAmount) * 100));
-                        }
-                      }}
-                      className="font-mono-num mt-1 w-full rounded-lg border border-emerald-700/70 bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-emerald-300 focus:border-emerald-500 focus:outline-none"
-                    />
-                  </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-zinc-300">
+                        Comissão (%)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step="0.1"
+                        value={commPercent || ''}
+                        onChange={(e) => {
+                          const pct = Number(e.target.value);
+                          setCommPercent(pct);
+                          if (originalSaleAmount > 0) {
+                            setCommAmount(round2((originalSaleAmount * pct) / 100));
+                          }
+                        }}
+                        className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                      />
+                    </div>
 
-                  <div className="sm:col-span-2">
-                    <label className="block text-[11px] font-medium text-zinc-300">
-                      WhatsApp / PIX (opcional)
-                    </label>
-                    <input
-                      type="text"
-                      value={commSellerContact}
-                      onChange={(e) => setCommSellerContact(e.target.value)}
-                      placeholder="Para repasse"
-                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
-                    />
-                  </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-zinc-300">
+                        Valor Comissão (R$) *
+                      </label>
+                      <input
+                        type="number"
+                        min={0.01}
+                        step="0.01"
+                        value={commAmount || ''}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setCommAmount(val);
+                          if (originalSaleAmount > 0 && val >= 0) {
+                            setCommPercent(round2((val / originalSaleAmount) * 100));
+                          }
+                        }}
+                        className="font-mono-num mt-1 w-full rounded-lg border border-emerald-700/70 bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-emerald-300 focus:border-emerald-500 focus:outline-none"
+                      />
+                    </div>
 
-                  <div className="sm:col-span-2">
-                    <label className="block text-[11px] font-medium text-zinc-300">
-                      Vencimento no Financeiro
-                    </label>
-                    <input
-                      type="date"
-                      value={commDueDate}
-                      onChange={(e) => setCommDueDate(e.target.value)}
-                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
-                    />
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-medium text-zinc-300">
+                        WhatsApp / PIX (opcional)
+                      </label>
+                      <input
+                        type="text"
+                        value={commSellerContact}
+                        onChange={(e) => setCommSellerContact(e.target.value)}
+                        placeholder="Para repasse"
+                        className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-medium text-zinc-300">
+                        Vencimento no Financeiro
+                      </label>
+                      <input
+                        type="date"
+                        value={commDueDate}
+                        onChange={(e) => setCommDueDate(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                      />
+                    </div>
                   </div>
                 </div>
               )}

@@ -473,6 +473,28 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidSeller(data) {
+      return data.keys().hasAll([
+          'ownerId', 'fullName', 'phone', 'whatsapp', 'pixKey',
+          'defaultCommissionPercent', 'active', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'fullName', 'phone', 'whatsapp', 'pixKey',
+          'defaultCommissionPercent', 'active', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidStr(data.fullName, 1, 120)
+        && isValidStr(data.phone, 0, 32)
+        && isValidStr(data.whatsapp, 0, 32)
+        && isValidStr(data.pixKey, 0, 120)
+        && data.defaultCommissionPercent is number && data.defaultCommissionPercent >= 0 && data.defaultCommissionPercent <= 100
+        && data.active is bool
+        && isValidStr(data.notes, 0, 300)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // Connection check path
     match /test/{docId} {
       allow get: if isSignedIn() && isValidId(docId);
@@ -707,6 +729,22 @@ service cloud.firestore {
           'paidAmount', 'status', 'paidDate', 'notes', 'updatedAt'
         ]);
       allow delete: if isAdmin() && isValidId(commissionId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /sellers/{sellerId} {
+      allow get: if isAdmin() && isValidId(sellerId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(sellerId) && isValidSeller(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(sellerId) && isValidSeller(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'fullName', 'phone', 'whatsapp', 'pixKey',
+          'defaultCommissionPercent', 'active', 'notes', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(sellerId) && existing().ownerId == request.auth.uid;
     }
   }
 }

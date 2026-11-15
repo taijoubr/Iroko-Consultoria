@@ -25,6 +25,7 @@ export function SettingsPage() {
     cardSettlements,
     personalConsumptions,
     commissions,
+    sellers,
   } = useAppData();
 
   const [boletoSurchargePercent, setBoletoSurchargePercent] = useState(5);
@@ -139,6 +140,7 @@ export function SettingsPage() {
       cardSettlements,
       personalConsumptions,
       commissions,
+      sellers,
     });
   };
 
@@ -147,6 +149,7 @@ export function SettingsPage() {
       { name: 'Produtos', rows: products.map((p) => ({ ID: p.id, Nome: p.name, Marca: p.brand, Codigo: p.code, Disponivel: p.availableQty, Reservado: p.reservedQty })) },
       { name: 'Compras', rows: purchases.map((p) => ({ Pedido: p.orderNumber, Data: p.purchaseDate, Marca: p.brand, Pagamento: p.paymentMethod, Original: p.originalTotal, Efetivo: p.effectiveTotal })) },
       { name: 'Clientes', rows: clients.map((c) => ({ Nome: c.fullName, WhatsApp: c.whatsapp, Telefone: c.phone, Endereco: c.address })) },
+      { name: 'Vendedores', rows: sellers.map((s) => ({ Nome: s.fullName, WhatsApp: s.whatsapp, Telefone: s.phone, PIX: s.pixKey, ComissaoPadraoPct: s.defaultCommissionPercent, Ativo: s.active ? 'Sim' : 'Não' })) },
       { name: 'Vendas', rows: sales.map((s) => ({ Doc: s.documentNumber, Data: s.saleDate, Cliente: s.clientName, Valor: s.originalSaleAmount, CustoFIFO: s.totalProductCost, Lucro: s.grossProfitOnProducts, Pago: s.paidAmount, Pendente: s.pendingAmount })) },
       { name: 'Contas_Receber', rows: receivables.map((r) => ({ Doc: r.documentNumber, Cliente: r.clientName, Parcela: `${r.installmentNumber}/${r.totalInstallments}`, Vencimento: r.dueDate, Total: r.totalAmount, Pago: r.paidAmount, Status: r.status })) },
       { name: 'Contas_Pagar', rows: payables.map((p) => ({ Descricao: p.description, Vencimento: p.dueDate, Total: p.totalAmount, Pago: p.paidAmount, Status: p.status })) },

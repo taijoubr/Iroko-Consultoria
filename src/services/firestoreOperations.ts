@@ -1065,6 +1065,70 @@ export async function saveClient(
   }
 }
 
+export async function saveSeller(
+  ownerId: string,
+  data: {
+    fullName: string;
+    phone: string;
+    whatsapp: string;
+    pixKey: string;
+    defaultCommissionPercent: number;
+    active: boolean;
+    notes: string;
+  },
+  existingId?: string
+): Promise<string> {
+  if (!data.fullName.trim()) {
+    throw new Error('O nome completo do(a) vendedor(a) é obrigatório.');
+  }
+  const pct = round2(Math.max(0, Math.min(100, Number(data.defaultCommissionPercent) || 0)));
+  const sellerId = existingId || generateId('sel');
+  const ref = doc(db, 'sellers', sellerId);
+
+  try {
+    const batch = writeBatch(db);
+    if (existingId) {
+      batch.update(ref, {
+        fullName: sanitizeStr(data.fullName, 120),
+        phone: sanitizeStr(data.phone, 32),
+        whatsapp: sanitizeStr(data.whatsapp, 32),
+        pixKey: sanitizeStr(data.pixKey, 120),
+        defaultCommissionPercent: pct,
+        active: Boolean(data.active),
+        notes: sanitizeStr(data.notes, 300),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      batch.set(ref, {
+        ownerId,
+        fullName: sanitizeStr(data.fullName, 120),
+        phone: sanitizeStr(data.phone, 32),
+        whatsapp: sanitizeStr(data.whatsapp, 32),
+        pixKey: sanitizeStr(data.pixKey, 120),
+        defaultCommissionPercent: pct,
+        active: Boolean(data.active),
+        notes: sanitizeStr(data.notes, 300),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    await batch.commit();
+    return sellerId;
+  } catch (err) {
+    handleFirestoreError(err, existingId ? OperationType.UPDATE : OperationType.CREATE, `sellers/${sellerId}`);
+  }
+}
+
+export async function deleteSeller(sellerId: string): Promise<void> {
+  try {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'sellers', sellerId));
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `sellers/${sellerId}`);
+  }
+}
+
 export interface RegisterSaleInput {
   client: Client;
   saleDate: string;

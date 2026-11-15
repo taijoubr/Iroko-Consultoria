@@ -330,6 +330,20 @@ export interface PersonalConsumption {
   createdAt?: Timestamp | unknown;
 }
 
+export interface Seller {
+  id: string;
+  ownerId: string;
+  fullName: string;
+  phone: string;
+  whatsapp: string;
+  pixKey: string;
+  defaultCommissionPercent: number;
+  active: boolean;
+  notes: string;
+  createdAt?: Timestamp | unknown;
+  updatedAt?: Timestamp | unknown;
+}
+
 export interface Commission {
   id: string;
   ownerId: string;

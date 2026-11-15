@@ -35,6 +35,7 @@ import type {
   Purchase,
   Receivable,
   Sale,
+  Seller,
   SettingsHistory,
   StockLot,
   StockMovement,
@@ -62,6 +63,7 @@ interface AppDataContextValue {
   cardSettlements: CardSettlement[];
   personalConsumptions: PersonalConsumption[];
   commissions: Commission[];
+  sellers: Seller[];
 }
 
 const AppDataContext = createContext<AppDataContextValue | undefined>(undefined);
@@ -111,6 +113,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [cardSettlements, setCardSettlements] = useState<CardSettlement[]>([]);
   const [personalConsumptions, setPersonalConsumptions] = useState<PersonalConsumption[]>([]);
   const [commissions, setCommissions] = useState<Commission[]>([]);
+  const [sellers, setSellers] = useState<Seller[]>([]);
 
   const isAuthorized = Boolean(
     user &&
@@ -154,13 +157,14 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       setCardSettlements([]);
       setPersonalConsumptions([]);
       setCommissions([]);
+      setSellers([]);
       return;
     }
 
     setDataLoading(true);
     const uid = user.uid;
     let initialLoaded = 0;
-    const totalStreams = 14;
+    const totalStreams = 15;
     const markLoaded = () => {
       initialLoaded += 1;
       if (initialLoaded >= totalStreams) setDataLoading(false);
@@ -214,6 +218,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       subscribeCol<CardSettlement>('cardSettlements', setCardSettlements),
       subscribeCol<PersonalConsumption>('personalConsumptions', setPersonalConsumptions),
       subscribeCol<Commission>('commissions', setCommissions),
+      subscribeCol<Seller>('sellers', setSellers),
     ];
 
     return () => {
@@ -276,6 +281,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         cardSettlements,
         personalConsumptions,
         commissions,
+        sellers,
       }}
     >
       {children}
