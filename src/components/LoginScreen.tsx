@@ -30,8 +30,8 @@ export function LoginScreen({
           <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-red-900/70 bg-red-950/60 p-3 text-xs text-red-300">
             <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
             <div>
-              <p className="font-semibold">Acesso não autorizado</p>
-              <p className="mt-0.5">{error}</p>
+              <p className="font-semibold">Não foi possível entrar</p>
+              <p className="mt-0.5 leading-relaxed">{error}</p>
             </div>
           </div>
         )}

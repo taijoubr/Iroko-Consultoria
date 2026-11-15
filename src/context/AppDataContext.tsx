@@ -1,7 +1,9 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
+  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -62,6 +64,31 @@ interface AppDataContextValue {
 
 const AppDataContext = createContext<AppDataContextValue | undefined>(undefined);
 
+function formatAuthError(err: unknown): string {
+  const code = (err as { code?: string })?.code ?? '';
+  switch (code) {
+    case 'auth/unauthorized-domain':
+      return `Este domínio (${typeof window !== 'undefined' ? window.location.hostname : ''}) ainda não está autorizado no Firebase. Adicione-o em Authentication → Settings → Authorized domains no Console do Firebase.`;
+    case 'auth/popup-blocked':
+      return 'O navegador bloqueou o pop-up do Google. Libere pop-ups para este site ou tente novamente.';
+    case 'auth/popup-closed-by-user':
+      return 'A janela de login foi fechada antes de concluir a entrada.';
+    case 'auth/cancelled-popup-request':
+      return 'Solicitação de login cancelada. Tente novamente.';
+    case 'auth/operation-not-allowed':
+      return 'Este método de login ainda não está ativado no Console do Firebase (Authentication → Sign-in method).';
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+    case 'auth/invalid-email':
+      return 'E-mail ou senha inválidos.';
+    case 'auth/too-many-requests':
+      return 'Muitas tentativas seguidas. Aguarde alguns instantes e tente novamente.';
+    default:
+      return err instanceof Error ? err.message : 'Erro ao autenticar.';
+  }
+}
+
 export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -90,6 +117,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     testFirestoreConnection();
+    getRedirectResult(auth).catch((err) => {
+      const msg = formatAuthError(err);
+      if (msg) setAuthError(msg);
+    });
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthLoading(false);
@@ -195,8 +226,20 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         );
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Erro ao autenticar com o Google.';
-      setAuthError(msg);
+      const code = (err as { code?: string })?.code;
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment'
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          setAuthError(formatAuthError(redirectErr));
+          return;
+        }
+      }
+      setAuthError(formatAuthError(err));
     }
   };
 
