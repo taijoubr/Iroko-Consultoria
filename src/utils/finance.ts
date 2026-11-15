@@ -41,7 +41,8 @@ export function calculatePurchaseFinancials(
   referenceDate: string,
   installment1Days: number,
   installment2Days: number,
-  overrideOriginalTotal?: number
+  overrideOriginalTotal?: number,
+  overrideEffectiveTotal?: number
 ): CalculatedPurchase {
   const sumItemsOriginal = round2(
     draftItems.reduce((acc, item) => acc + item.quantity * item.unitOriginalCost, 0)
@@ -51,28 +52,64 @@ export function calculatePurchaseFinancials(
       ? round2(overrideOriginalTotal)
       : sumItemsOriginal;
 
-  const appliedPercent = paymentMethod === 'BOLETO_2X' ? surchargePercent : 0;
-  const surchargeAmount =
-    paymentMethod === 'BOLETO_2X' ? round2(originalTotal * (appliedPercent / 100)) : 0;
-  const effectiveTotal = round2(originalTotal + surchargeAmount);
+  const hasRealTotalOverride =
+    overrideEffectiveTotal !== undefined && overrideEffectiveTotal > 0;
 
-  // Prorate financial surcharge across items proportionally by item subtotal
+  let effectiveTotal: number;
+  let surchargeAmount: number;
+  let appliedPercent: number;
+
+  if (hasRealTotalOverride) {
+    effectiveTotal = round2(overrideEffectiveTotal!);
+    if (effectiveTotal >= originalTotal) {
+      surchargeAmount = round2(effectiveTotal - originalTotal);
+      appliedPercent =
+        originalTotal > 0 ? round2((surchargeAmount / originalTotal) * 100) : 0;
+    } else {
+      // Paid less than original items sum (e.g. invoice discount/credit): keep surcharge >= 0
+      surchargeAmount = 0;
+      appliedPercent = 0;
+    }
+  } else {
+    appliedPercent = paymentMethod === 'BOLETO_2X' ? surchargePercent : 0;
+    surchargeAmount =
+      paymentMethod === 'BOLETO_2X' ? round2(originalTotal * (appliedPercent / 100)) : 0;
+    effectiveTotal = round2(originalTotal + surchargeAmount);
+  }
+
+  // Prorate financial surcharge (or discounted real total) proportionally across items
+  const totalUnits = draftItems.reduce((acc, item) => acc + Math.max(0, item.quantity), 0);
+  const isDiscountedRealTotal = hasRealTotalOverride && effectiveTotal < sumItemsOriginal;
+
   let remainingSurcharge = surchargeAmount;
-  const denominator = sumItemsOriginal > 0 ? sumItemsOriginal : 1;
+  let remainingDiscountedTarget = effectiveTotal;
+  const denominator = sumItemsOriginal > 0 ? sumItemsOriginal : totalUnits > 0 ? totalUnits : 1;
 
   const items: PurchaseItem[] = draftItems.map((item, idx) => {
     const itemOriginalTotal = round2(item.quantity * item.unitOriginalCost);
+    const weight = sumItemsOriginal > 0 ? itemOriginalTotal : Math.max(0, item.quantity);
     let allocatedFinancialCost = 0;
-    if (surchargeAmount > 0) {
+    let totalEffectiveCost = itemOriginalTotal;
+
+    if (isDiscountedRealTotal) {
       if (idx === draftItems.length - 1) {
-        allocatedFinancialCost = round2(remainingSurcharge);
+        totalEffectiveCost = round2(Math.max(0, remainingDiscountedTarget));
       } else {
-        allocatedFinancialCost = round2(surchargeAmount * (itemOriginalTotal / denominator));
-        remainingSurcharge = round2(remainingSurcharge - allocatedFinancialCost);
+        totalEffectiveCost = round2(effectiveTotal * (weight / denominator));
+        remainingDiscountedTarget = round2(remainingDiscountedTarget - totalEffectiveCost);
       }
+    } else {
+      if (surchargeAmount > 0) {
+        if (idx === draftItems.length - 1) {
+          allocatedFinancialCost = round2(remainingSurcharge);
+        } else {
+          allocatedFinancialCost = round2(surchargeAmount * (weight / denominator));
+          remainingSurcharge = round2(remainingSurcharge - allocatedFinancialCost);
+        }
+      }
+      totalEffectiveCost = round2(itemOriginalTotal + allocatedFinancialCost);
     }
 
-    const totalEffectiveCost = round2(itemOriginalTotal + allocatedFinancialCost);
     const unitFinancialCost =
       item.quantity > 0 ? round2(allocatedFinancialCost / item.quantity) : 0;
     const unitEffectiveCost =
@@ -96,32 +133,36 @@ export function calculatePurchaseFinancials(
     };
   });
 
+  const principalBase =
+    hasRealTotalOverride && effectiveTotal < originalTotal ? effectiveTotal : originalTotal;
+
   if (paymentMethod === 'A_VISTA') {
+    const instInterest = round2(Math.max(0, effectiveTotal - principalBase));
     return {
       originalTotal,
-      surchargePercentApplied: 0,
-      surchargeAmount: 0,
-      effectiveTotal: originalTotal,
+      surchargePercentApplied: appliedPercent,
+      surchargeAmount,
+      effectiveTotal,
       items,
       installments: [
         {
           installmentNumber: 1,
           dueDate: referenceDate,
-          originalAmount: originalTotal,
-          interestAmount: 0,
-          totalAmount: originalTotal,
+          originalAmount: principalBase,
+          interestAmount: instInterest,
+          totalAmount: effectiveTotal,
         },
       ],
     };
   }
 
-  // Boleto 2x: divide total into 2 equal installments with exact cent reconciliation
+  // Boleto 2x: divide total into 2 installments with exact cent reconciliation
   const p1Total = round2(effectiveTotal / 2);
   const p2Total = round2(effectiveTotal - p1Total);
-  const p1Principal = round2(originalTotal / 2);
-  const p2Principal = round2(originalTotal - p1Principal);
-  const p1Interest = round2(p1Total - p1Principal);
-  const p2Interest = round2(p2Total - p2Principal);
+  const p1Principal = round2(principalBase / 2);
+  const p2Principal = round2(principalBase - p1Principal);
+  const p1Interest = round2(Math.max(0, p1Total - p1Principal));
+  const p2Interest = round2(Math.max(0, p2Total - p2Principal));
 
   return {
     originalTotal,

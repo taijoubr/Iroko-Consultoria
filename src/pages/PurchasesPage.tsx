@@ -52,6 +52,7 @@ export function PurchasesPage({
   const [referenceDate, setReferenceDate] = useState(getTodayISO());
   const [paymentMethod, setPaymentMethod] = useState<PurchasePaymentMethod>('BOLETO_2X');
   const [overrideOriginalTotal, setOverrideOriginalTotal] = useState<string>('');
+  const [overrideEffectiveTotal, setOverrideEffectiveTotal] = useState<string>('');
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<PurchaseDraftItem[]>([]);
   const [draftItem, setDraftItem] = useState<PurchaseDraftItem>({
@@ -187,6 +188,13 @@ export function PurchasesPage({
     qtyForStock: 1,
   });
 
+  const parseDecimalPositive = (raw: string): number | undefined => {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    const parsed = Number(trimmed.replace(',', '.'));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  };
+
   const resetFormToNew = () => {
     const initialCat = settings?.categories?.[0] || 'Perfumaria';
     setEditingPurchase(null);
@@ -197,6 +205,7 @@ export function PurchasesPage({
     setReferenceDate(getTodayISO());
     setPaymentMethod('BOLETO_2X');
     setOverrideOriginalTotal('');
+    setOverrideEffectiveTotal('');
     setNotes('');
     setItems([]);
     setDraftItem(createEmptyDraft('Avon', initialCat));
@@ -219,7 +228,19 @@ export function PurchasesPage({
     setPaymentMethod(p.paymentMethod);
     const itemsOrigSum = p.items.reduce((acc, it) => acc + it.quantity * it.unitOriginalCost, 0);
     setOverrideOriginalTotal(
-      Math.abs(itemsOrigSum - p.originalTotal) > 0.02 ? p.originalTotal.toFixed(2) : ''
+      Math.abs(itemsOrigSum - p.originalTotal) > 0.02
+        ? p.originalTotal.toFixed(2).replace('.', ',')
+        : ''
+    );
+    const expectedEstimatedSurcharge =
+      p.paymentMethod === 'BOLETO_2X'
+        ? round2(p.originalTotal * ((settings?.boletoSurchargePercent ?? 5) / 100))
+        : 0;
+    const expectedEstimatedEffective = round2(p.originalTotal + expectedEstimatedSurcharge);
+    setOverrideEffectiveTotal(
+      Math.abs(expectedEstimatedEffective - p.effectiveTotal) > 0.01
+        ? p.effectiveTotal.toFixed(2).replace('.', ',')
+        : ''
     );
     setNotes(p.notes || '');
     setItems(
@@ -261,9 +282,8 @@ export function PurchasesPage({
     return [];
   }, [items, draftItem]);
 
-  const liveCalc = useMemo(() => {
-    const parsedOverride =
-      overrideOriginalTotal.trim() !== '' ? Number(overrideOriginalTotal) : undefined;
+  const estimatedCalc = useMemo(() => {
+    const parsedOverrideOrig = parseDecimalPositive(overrideOriginalTotal);
     return calculatePurchaseFinancials(
       effectiveItemsForPreview,
       paymentMethod,
@@ -271,7 +291,7 @@ export function PurchasesPage({
       referenceDate || purchaseDate,
       settings?.boletoInstallment1Days ?? 24,
       settings?.boletoInstallment2Days ?? 45,
-      parsedOverride
+      parsedOverrideOrig
     );
   }, [
     effectiveItemsForPreview,
@@ -280,6 +300,29 @@ export function PurchasesPage({
     referenceDate,
     purchaseDate,
     overrideOriginalTotal,
+  ]);
+
+  const liveCalc = useMemo(() => {
+    const parsedOverrideOrig = parseDecimalPositive(overrideOriginalTotal);
+    const parsedOverrideEff = parseDecimalPositive(overrideEffectiveTotal);
+    return calculatePurchaseFinancials(
+      effectiveItemsForPreview,
+      paymentMethod,
+      settings?.boletoSurchargePercent ?? 5,
+      referenceDate || purchaseDate,
+      settings?.boletoInstallment1Days ?? 24,
+      settings?.boletoInstallment2Days ?? 45,
+      parsedOverrideOrig,
+      parsedOverrideEff
+    );
+  }, [
+    effectiveItemsForPreview,
+    paymentMethod,
+    settings,
+    referenceDate,
+    purchaseDate,
+    overrideOriginalTotal,
+    overrideEffectiveTotal,
   ]);
 
   const filteredPurchases = useMemo(() => {
@@ -558,8 +601,8 @@ export function PurchasesPage({
         billingDate,
         referenceDate,
         paymentMethod,
-        overrideOriginalTotal:
-          overrideOriginalTotal.trim() !== '' ? Number(overrideOriginalTotal) : undefined,
+        overrideOriginalTotal: parseDecimalPositive(overrideOriginalTotal),
+        overrideEffectiveTotal: parseDecimalPositive(overrideEffectiveTotal),
         notes,
         items: itemsToSubmit,
       };
@@ -1489,31 +1532,69 @@ export function PurchasesPage({
             );
           })()}
 
-          {/* Override original total + Notes */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div>
+          {/* Override totals + Notes */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+            <div className="sm:col-span-3">
               <label className="block text-xs font-medium text-zinc-300">
-                Valor Original do Pedido (opcional se igual aos itens)
+                Valor Original (opcional)
               </label>
               <input
-                type="number"
-                min={0}
-                step="0.01"
+                type="text"
+                inputMode="decimal"
                 disabled={Boolean(editingPurchase && !editEligibility.allowed)}
                 value={overrideOriginalTotal}
-                onChange={(e) => setOverrideOriginalTotal(e.target.value)}
-                placeholder={liveCalc.originalTotal.toFixed(2)}
-                className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 disabled:opacity-50"
+                onChange={(e) =>
+                  setOverrideOriginalTotal(e.target.value.replace(/[^0-9.,]/g, ''))
+                }
+                placeholder={estimatedCalc.originalTotal.toFixed(2).replace('.', ',')}
+                className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               />
+              <span className="mt-1 block text-[10px] text-zinc-500">
+                Soma dos itens: {formatCurrency(estimatedCalc.originalTotal)}
+              </span>
             </div>
-            <div className="sm:col-span-2">
+
+            <div className="sm:col-span-4">
+              <div className="flex items-center justify-between gap-1">
+                <label className="block text-xs font-medium text-emerald-300">
+                  Valor Pago Real do Pedido (R$)
+                </label>
+                {overrideEffectiveTotal && !(editingPurchase && !editEligibility.allowed) && (
+                  <button
+                    type="button"
+                    onClick={() => setOverrideEffectiveTotal('')}
+                    className="text-[10px] font-medium text-zinc-400 hover:text-zinc-200"
+                  >
+                    Usar estimado
+                  </button>
+                )}
+              </div>
+              <input
+                type="text"
+                inputMode="decimal"
+                disabled={Boolean(editingPurchase && !editEligibility.allowed)}
+                value={overrideEffectiveTotal}
+                onChange={(e) =>
+                  setOverrideEffectiveTotal(e.target.value.replace(/[^0-9.,]/g, ''))
+                }
+                placeholder={`Estimado: ${estimatedCalc.effectiveTotal.toFixed(2).replace('.', ',')}`}
+                className="font-mono-num mt-1 w-full rounded-lg border border-emerald-800/70 bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
+              />
+              <span className="mt-1 block text-[10px] text-zinc-400">
+                {parseDecimalPositive(overrideEffectiveTotal) !== undefined
+                  ? `Taxa real aplicada: ${formatCurrency(liveCalc.surchargeAmount)} (${formatPercent(liveCalc.surchargePercentApplied)})`
+                  : 'Opcional: informe o total real pago para zerar diferença de taxa.'}
+              </span>
+            </div>
+
+            <div className="sm:col-span-5">
               <label className="block text-xs font-medium text-zinc-300">Observações</label>
               <input
                 type="text"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Anotações do ciclo, campanha ou entrega"
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
               />
             </div>
           </div>
@@ -1521,9 +1602,16 @@ export function PurchasesPage({
           {/* Financial Preview */}
           <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-display text-xs font-semibold text-zinc-100">
-                Resumo Financeiro da Compra
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="font-display text-xs font-semibold text-zinc-100">
+                  Resumo Financeiro da Compra
+                </span>
+                {parseDecimalPositive(overrideEffectiveTotal) !== undefined && (
+                  <span className="rounded border border-emerald-800/70 bg-emerald-950/50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                    Valor real aplicado
+                  </span>
+                )}
+              </div>
               <span className="text-[11px] text-zinc-400">
                 Parâmetros informativos: Juros {formatPercent(settings?.refMonthlyInterestRate ?? 3)} a.m. ·{' '}
                 {formatPercent(settings?.refAnnualInterestRate ?? 42.58)} a.a. · CET{' '}
@@ -1542,7 +1630,7 @@ export function PurchasesPage({
               </div>
               <div>
                 <p className="text-[11px] text-zinc-400">
-                  Acréscimo ({formatPercent(liveCalc.surchargePercentApplied)})
+                  Acréscimo / Taxa ({formatPercent(liveCalc.surchargePercentApplied)})
                 </p>
                 <p className="font-mono-num text-sm font-semibold text-amber-400">
                   {formatCurrency(liveCalc.surchargeAmount)}

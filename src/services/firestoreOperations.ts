@@ -164,6 +164,7 @@ export interface RegisterPurchaseInput {
   referenceDate: string;
   paymentMethod: PurchasePaymentMethod;
   overrideOriginalTotal?: number;
+  overrideEffectiveTotal?: number;
   notes: string;
   items: PurchaseDraftItem[];
 }
@@ -198,7 +199,8 @@ export async function registerPurchase(
     input.referenceDate || input.purchaseDate,
     settings.boletoInstallment1Days,
     settings.boletoInstallment2Days,
-    input.overrideOriginalTotal
+    input.overrideOriginalTotal,
+    input.overrideEffectiveTotal
   );
 
   const purchaseId = generateId('pur');
@@ -637,7 +639,8 @@ export async function updatePurchase(
     input.referenceDate || input.purchaseDate,
     settings.boletoInstallment1Days,
     settings.boletoInstallment2Days,
-    input.overrideOriginalTotal
+    input.overrideOriginalTotal,
+    input.overrideEffectiveTotal
   );
 
   // Revert old lot quantities in memory before applying new items
