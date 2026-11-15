@@ -156,7 +156,7 @@ export interface Purchase {
 export interface Payable {
   id: string;
   ownerId: string;
-  type: 'BOLETO_AVON' | 'BOLETO_NATURA' | 'BOLETO_MISTO' | 'DESPESA';
+  type: 'BOLETO_AVON' | 'BOLETO_NATURA' | 'BOLETO_MISTO' | 'DESPESA' | 'COMISSAO';
   purchaseId: string;
   orderNumber: string;
   description: string;
@@ -330,12 +330,35 @@ export interface PersonalConsumption {
   createdAt?: Timestamp | unknown;
 }
 
+export interface Commission {
+  id: string;
+  ownerId: string;
+  sellerName: string;
+  sellerContact: string;
+  saleId: string;
+  saleDocumentNumber: string;
+  clientName: string;
+  commissionDate: string;
+  dueDate: string;
+  baseAmount: number;
+  commissionPercent: number;
+  commissionAmount: number;
+  paidAmount: number;
+  status: PaymentStatus;
+  paidDate: string;
+  payableId: string;
+  notes: string;
+  createdAt?: Timestamp | unknown;
+  updatedAt?: Timestamp | unknown;
+}
+
 export type AppModule =
   | 'dashboard'
   | 'purchases'
   | 'inventory'
   | 'clients'
   | 'sales'
+  | 'commissions'
   | 'finance'
   | 'consumption'
   | 'reports'

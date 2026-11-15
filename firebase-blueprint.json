@@ -229,7 +229,7 @@
       "type": "object",
       "properties": {
         "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "type": { "type": "string", "enum": ["BOLETO_AVON", "BOLETO_NATURA", "BOLETO_MISTO", "DESPESA"] },
+        "type": { "type": "string", "enum": ["BOLETO_AVON", "BOLETO_NATURA", "BOLETO_MISTO", "DESPESA", "COMISSAO"] },
         "purchaseId": { "type": "string", "maxLength": 128 },
         "orderNumber": { "type": "string", "maxLength": 64 },
         "description": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -505,6 +505,51 @@
         "notes",
         "createdAt"
       ]
+    },
+    "Commission": {
+      "title": "Commission",
+      "description": "Comissão de vendedor(a) vinculada a uma venda ou avulsa, sincronizada com Contas a Pagar.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "sellerContact": { "type": "string", "maxLength": 120 },
+        "saleId": { "type": "string", "maxLength": 128 },
+        "saleDocumentNumber": { "type": "string", "maxLength": 40 },
+        "clientName": { "type": "string", "maxLength": 140 },
+        "commissionDate": { "type": "string", "maxLength": 20 },
+        "dueDate": { "type": "string", "maxLength": 20 },
+        "baseAmount": { "type": "number" },
+        "commissionPercent": { "type": "number" },
+        "commissionAmount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["PENDENTE", "PARCIAL", "PAGO"] },
+        "paidDate": { "type": "string", "maxLength": 20 },
+        "payableId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "notes": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerId",
+        "sellerName",
+        "sellerContact",
+        "saleId",
+        "saleDocumentNumber",
+        "clientName",
+        "commissionDate",
+        "dueDate",
+        "baseAmount",
+        "commissionPercent",
+        "commissionAmount",
+        "paidAmount",
+        "status",
+        "paidDate",
+        "payableId",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -559,6 +604,10 @@
     "/personalConsumptions/{consumptionId}": {
       "schema": { "$ref": "#/entities/PersonalConsumption" },
       "description": "Registros de consumo próprio do administrador."
+    },
+    "/commissions/{commissionId}": {
+      "schema": { "$ref": "#/entities/Commission" },
+      "description": "Comissões de vendedores sincronizadas com Contas a Pagar."
     }
   }
 }

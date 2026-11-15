@@ -14,6 +14,7 @@ import type {
   Brand,
   CardSettlement,
   Client,
+  Commission,
   DeliveryStatus,
   Payable,
   Payment,
@@ -1076,6 +1077,14 @@ export interface RegisterSaleInput {
   ownCreditFirstDueDate: string;
   customDueDates?: string[];
   notes: string;
+  commission?: {
+    sellerName: string;
+    sellerContact: string;
+    commissionPercent: number;
+    commissionAmount: number;
+    dueDate: string;
+    notes: string;
+  };
 }
 
 export async function registerSale(
@@ -1387,6 +1396,60 @@ export async function registerSale(
     });
   }
 
+  // Optional Commission linked to this Sale (created atomically with Payable)
+  if (input.commission && input.commission.sellerName.trim() && input.commission.commissionAmount > 0) {
+    const cSeller = sanitizeStr(input.commission.sellerName, 120);
+    const cAmount = round2(input.commission.commissionAmount);
+    const cDueDate = input.commission.dueDate || input.saleDate;
+    const cPayableId = generateId('paycom');
+    const cId = generateId('com');
+
+    batch.set(doc(db, 'payables', cPayableId), {
+      ownerId,
+      type: 'COMISSAO',
+      purchaseId: '',
+      orderNumber: documentNumber,
+      description: sanitizeStr(
+        `Comissão · ${cSeller} (${documentNumber} · ${input.client.fullName})`,
+        200
+      ),
+      installmentNumber: 1,
+      totalInstallments: 1,
+      dueDate: cDueDate,
+      originalAmount: cAmount,
+      interestAmount: 0,
+      totalAmount: cAmount,
+      paidAmount: 0,
+      status: 'PENDENTE',
+      paidDate: '',
+      category: sanitizeStr(`Comissão · ${cSeller}`, 80),
+      notes: sanitizeStr(input.commission.notes, 300),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    batch.set(doc(db, 'commissions', cId), {
+      ownerId,
+      sellerName: cSeller,
+      sellerContact: sanitizeStr(input.commission.sellerContact, 120),
+      saleId,
+      saleDocumentNumber: documentNumber,
+      clientName: sanitizeStr(input.client.fullName, 140),
+      commissionDate: input.saleDate,
+      dueDate: cDueDate,
+      baseAmount: round2(input.originalSaleAmount),
+      commissionPercent: round2(Math.max(0, Math.min(100, input.commission.commissionPercent))),
+      commissionAmount: cAmount,
+      paidAmount: 0,
+      status: 'PENDENTE',
+      paidDate: '',
+      payableId: cPayableId,
+      notes: sanitizeStr(input.commission.notes, 300),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
   try {
     await batch.commit();
     return saleId;
@@ -1430,7 +1493,8 @@ export async function deleteSale(
   stockMovements: StockMovement[],
   receivables: Receivable[],
   payments: Payment[],
-  cardSettlements: CardSettlement[]
+  cardSettlements: CardSettlement[],
+  commissions: Commission[] = []
 ): Promise<void> {
   const batch = writeBatch(db);
 
@@ -1494,6 +1558,25 @@ export async function deleteSale(
   for (const card of cardSettlements) {
     if (card.saleId === sale.id) {
       batch.delete(doc(db, 'cardSettlements', card.id));
+    }
+  }
+  for (const com of commissions) {
+    if (com.saleId === sale.id) {
+      if (com.paidAmount <= 0) {
+        batch.delete(doc(db, 'commissions', com.id));
+        if (com.payableId) {
+          batch.delete(doc(db, 'payables', com.payableId));
+        }
+      } else {
+        batch.update(doc(db, 'commissions', com.id), {
+          saleId: '',
+          notes: sanitizeStr(
+            `${com.notes ? `${com.notes} · ` : ''}Venda ${sale.documentNumber} excluída`,
+            300
+          ),
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
   }
 
@@ -2207,7 +2290,8 @@ export async function registerPayablePayment(
   payable: Payable,
   payAmount: number,
   paidDate: string,
-  notes: string
+  notes: string,
+  commissions: Commission[] = []
 ): Promise<void> {
   const remaining = round2(payable.totalAmount - payable.paidAmount);
   if (payAmount <= 0 || payAmount > round2(remaining + 0.01)) {
@@ -2227,9 +2311,264 @@ export async function registerPayablePayment(
       notes: sanitizeStr(notes || payable.notes, 300),
       updatedAt: serverTimestamp(),
     });
+
+    if (payable.type === 'COMISSAO') {
+      let linkedCommission = commissions.find((c) => c.payableId === payable.id);
+      if (!linkedCommission) {
+        const snap = await getDocs(
+          query(
+            collection(db, 'commissions'),
+            where('ownerId', '==', payable.ownerId),
+            where('payableId', '==', payable.id)
+          )
+        );
+        if (!snap.empty) {
+          const d = snap.docs[0];
+          linkedCommission = { id: d.id, ...d.data() } as Commission;
+        }
+      }
+      if (linkedCommission) {
+        const comPaid = Math.min(newPaid, linkedCommission.commissionAmount);
+        const comStatus: PaymentStatus =
+          comPaid >= round2(linkedCommission.commissionAmount - 0.01) ? 'PAGO' : 'PARCIAL';
+        batch.update(doc(db, 'commissions', linkedCommission.id), {
+          paidAmount: round2(comPaid),
+          status: comStatus,
+          paidDate,
+          notes: sanitizeStr(notes || linkedCommission.notes, 300),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+
     await batch.commit();
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, `payables/${payable.id}`);
+  }
+}
+
+export interface CommissionInput {
+  sellerName: string;
+  sellerContact: string;
+  saleId: string;
+  saleDocumentNumber: string;
+  clientName: string;
+  commissionDate: string;
+  dueDate: string;
+  baseAmount: number;
+  commissionPercent: number;
+  commissionAmount: number;
+  paidNow?: boolean;
+  paidDate?: string;
+  notes: string;
+}
+
+function buildCommissionPayableDescription(
+  sellerName: string,
+  saleDocumentNumber: string,
+  clientName: string
+): string {
+  const cleanSeller = sellerName.trim();
+  if (saleDocumentNumber.trim()) {
+    const detail = clientName.trim()
+      ? `${saleDocumentNumber.trim()} · ${clientName.trim()}`
+      : saleDocumentNumber.trim();
+    return sanitizeStr(`Comissão · ${cleanSeller} (${detail})`, 200);
+  }
+  return sanitizeStr(`Comissão · ${cleanSeller}`, 200);
+}
+
+export async function createCommission(
+  ownerId: string,
+  data: CommissionInput
+): Promise<string> {
+  if (!data.sellerName.trim()) {
+    throw new Error('Informe o nome do(a) vendedor(a) comissionado(a).');
+  }
+  if (data.commissionAmount <= 0) {
+    throw new Error('Informe um valor de comissão maior que zero.');
+  }
+
+  const commissionId = generateId('com');
+  const payableId = generateId('paycom');
+  const amount = round2(data.commissionAmount);
+  const paidNow = Boolean(data.paidNow);
+  const effectivePaidDate = paidNow ? data.paidDate || data.dueDate : '';
+
+  try {
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'payables', payableId), {
+      ownerId,
+      type: 'COMISSAO',
+      purchaseId: '',
+      orderNumber: sanitizeStr(data.saleDocumentNumber, 64),
+      description: buildCommissionPayableDescription(
+        data.sellerName,
+        data.saleDocumentNumber,
+        data.clientName
+      ),
+      installmentNumber: 1,
+      totalInstallments: 1,
+      dueDate: data.dueDate,
+      originalAmount: amount,
+      interestAmount: 0,
+      totalAmount: amount,
+      paidAmount: paidNow ? amount : 0,
+      status: paidNow ? 'PAGO' : 'PENDENTE',
+      paidDate: effectivePaidDate,
+      category: sanitizeStr(`Comissão · ${data.sellerName.trim()}`, 80),
+      notes: sanitizeStr(data.notes, 300),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    batch.set(doc(db, 'commissions', commissionId), {
+      ownerId,
+      sellerName: sanitizeStr(data.sellerName, 120),
+      sellerContact: sanitizeStr(data.sellerContact, 120),
+      saleId: sanitizeStr(data.saleId, 128),
+      saleDocumentNumber: sanitizeStr(data.saleDocumentNumber, 40),
+      clientName: sanitizeStr(data.clientName, 140),
+      commissionDate: data.commissionDate,
+      dueDate: data.dueDate,
+      baseAmount: round2(Math.max(0, data.baseAmount)),
+      commissionPercent: round2(Math.max(0, Math.min(100, data.commissionPercent))),
+      commissionAmount: amount,
+      paidAmount: paidNow ? amount : 0,
+      status: paidNow ? 'PAGO' : 'PENDENTE',
+      paidDate: effectivePaidDate,
+      payableId,
+      notes: sanitizeStr(data.notes, 300),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    await batch.commit();
+    return commissionId;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `commissions/${commissionId}`);
+  }
+}
+
+export async function updateCommission(
+  commission: Commission,
+  data: Omit<CommissionInput, 'paidNow' | 'paidDate'>
+): Promise<void> {
+  if (!data.sellerName.trim()) {
+    throw new Error('Informe o nome do(a) vendedor(a) comissionado(a).');
+  }
+  if (data.commissionAmount <= 0) {
+    throw new Error('Informe um valor de comissão maior que zero.');
+  }
+
+  const newAmount = round2(data.commissionAmount);
+  if (newAmount < round2(commission.paidAmount - 0.01)) {
+    throw new Error(
+      'O valor total da comissão não pode ser menor que o valor já pago no financeiro.'
+    );
+  }
+
+  const newStatus: PaymentStatus =
+    commission.paidAmount >= round2(newAmount - 0.01)
+      ? 'PAGO'
+      : commission.paidAmount > 0
+        ? 'PARCIAL'
+        : 'PENDENTE';
+
+  try {
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'commissions', commission.id), {
+      sellerName: sanitizeStr(data.sellerName, 120),
+      sellerContact: sanitizeStr(data.sellerContact, 120),
+      saleId: sanitizeStr(data.saleId, 128),
+      saleDocumentNumber: sanitizeStr(data.saleDocumentNumber, 40),
+      clientName: sanitizeStr(data.clientName, 140),
+      commissionDate: data.commissionDate,
+      dueDate: data.dueDate,
+      baseAmount: round2(Math.max(0, data.baseAmount)),
+      commissionPercent: round2(Math.max(0, Math.min(100, data.commissionPercent))),
+      commissionAmount: newAmount,
+      status: newStatus,
+      notes: sanitizeStr(data.notes, 300),
+      updatedAt: serverTimestamp(),
+    });
+
+    if (commission.payableId) {
+      batch.update(doc(db, 'payables', commission.payableId), {
+        orderNumber: sanitizeStr(data.saleDocumentNumber, 64),
+        description: buildCommissionPayableDescription(
+          data.sellerName,
+          data.saleDocumentNumber,
+          data.clientName
+        ),
+        category: sanitizeStr(`Comissão · ${data.sellerName.trim()}`, 80),
+        dueDate: data.dueDate,
+        originalAmount: newAmount,
+        interestAmount: 0,
+        totalAmount: newAmount,
+        status: newStatus,
+        notes: sanitizeStr(data.notes, 300),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `commissions/${commission.id}`);
+  }
+}
+
+export async function registerCommissionPayment(
+  commission: Commission,
+  payAmount: number,
+  paidDate: string,
+  notes: string
+): Promise<void> {
+  const remaining = round2(commission.commissionAmount - commission.paidAmount);
+  if (payAmount <= 0 || payAmount > round2(remaining + 0.01)) {
+    throw new Error('Valor inválido para baixa da comissão.');
+  }
+
+  const newPaid = round2(commission.paidAmount + Math.min(payAmount, remaining));
+  const newStatus: PaymentStatus =
+    newPaid >= round2(commission.commissionAmount - 0.01) ? 'PAGO' : 'PARCIAL';
+
+  try {
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'commissions', commission.id), {
+      paidAmount: newPaid,
+      status: newStatus,
+      paidDate,
+      notes: sanitizeStr(notes || commission.notes, 300),
+      updatedAt: serverTimestamp(),
+    });
+
+    if (commission.payableId) {
+      batch.update(doc(db, 'payables', commission.payableId), {
+        paidAmount: newPaid,
+        status: newStatus,
+        paidDate,
+        notes: sanitizeStr(notes || commission.notes, 300),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `commissions/${commission.id}`);
+  }
+}
+
+export async function deleteCommission(commission: Commission): Promise<void> {
+  try {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'commissions', commission.id));
+    if (commission.payableId) {
+      batch.delete(doc(db, 'payables', commission.payableId));
+    }
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `commissions/${commission.id}`);
   }
 }
 
@@ -2548,6 +2887,7 @@ export async function resetOperationalData(
   options: { includeClients: boolean }
 ): Promise<number> {
   const targetCollections = [
+    'commissions',
     'cardSettlements',
     'payments',
     'receivables',

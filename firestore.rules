@@ -231,7 +231,7 @@ service cloud.firestore {
         ])
         && isValidId(data.ownerId)
         && data.ownerId == request.auth.uid
-        && data.type in ['BOLETO_AVON', 'BOLETO_NATURA', 'BOLETO_MISTO', 'DESPESA']
+        && data.type in ['BOLETO_AVON', 'BOLETO_NATURA', 'BOLETO_MISTO', 'DESPESA', 'COMISSAO']
         && isValidStr(data.purchaseId, 0, 128)
         && isValidStr(data.orderNumber, 0, 64)
         && isValidStr(data.description, 1, 200)
@@ -439,6 +439,40 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidCommission(data) {
+      return data.keys().hasAll([
+          'ownerId', 'sellerName', 'sellerContact', 'saleId', 'saleDocumentNumber',
+          'clientName', 'commissionDate', 'dueDate', 'baseAmount', 'commissionPercent',
+          'commissionAmount', 'paidAmount', 'status', 'paidDate', 'payableId',
+          'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'sellerName', 'sellerContact', 'saleId', 'saleDocumentNumber',
+          'clientName', 'commissionDate', 'dueDate', 'baseAmount', 'commissionPercent',
+          'commissionAmount', 'paidAmount', 'status', 'paidDate', 'payableId',
+          'notes', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidStr(data.sellerName, 1, 120)
+        && isValidStr(data.sellerContact, 0, 120)
+        && isValidStr(data.saleId, 0, 128)
+        && isValidStr(data.saleDocumentNumber, 0, 40)
+        && isValidStr(data.clientName, 0, 140)
+        && isValidStr(data.commissionDate, 1, 20)
+        && isValidStr(data.dueDate, 1, 20)
+        && data.baseAmount is number && data.baseAmount >= 0
+        && data.commissionPercent is number && data.commissionPercent >= 0 && data.commissionPercent <= 100
+        && data.commissionAmount is number && data.commissionAmount > 0
+        && data.paidAmount is number && data.paidAmount >= 0
+        && data.status in ['PENDENTE', 'PARCIAL', 'PAGO']
+        && isValidStr(data.paidDate, 0, 20)
+        && isValidId(data.payableId)
+        && isValidStr(data.notes, 0, 300)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // Connection check path
     match /test/{docId} {
       allow get: if isSignedIn() && isValidId(docId);
@@ -552,11 +586,11 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly([
-          'orderNumber', 'description', 'paidAmount', 'status', 'paidDate', 'dueDate',
+          'orderNumber', 'description', 'category', 'paidAmount', 'status', 'paidDate', 'dueDate',
           'originalAmount', 'interestAmount', 'totalAmount', 'notes', 'updatedAt'
         ]);
       allow delete: if isAdmin() && isValidId(payableId) && existing().ownerId == request.auth.uid
-        && existing().type in ['DESPESA', 'BOLETO_AVON', 'BOLETO_NATURA', 'BOLETO_MISTO'];
+        && existing().type in ['DESPESA', 'BOLETO_AVON', 'BOLETO_NATURA', 'BOLETO_MISTO', 'COMISSAO'];
     }
 
     match /clients/{clientId} {
@@ -653,6 +687,26 @@ service cloud.firestore {
         && existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
       allow update: if false;
       allow delete: if isAdmin() && isValidId(consumptionId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /commissions/{commissionId} {
+      allow get: if isAdmin() && isValidId(commissionId) && existing().ownerId == request.auth.uid;
+      allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
+      allow create: if isAdmin() && isValidId(commissionId) && isValidCommission(incoming())
+        && incoming().createdAt == request.time && incoming().updatedAt == request.time
+        && (incoming().saleId == '' || existsAfter(/databases/$(database)/documents/sales/$(incoming().saleId)))
+        && existsAfter(/databases/$(database)/documents/payables/$(incoming().payableId));
+      allow update: if isAdmin() && isValidId(commissionId) && isValidCommission(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().payableId == existing().payableId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'sellerName', 'sellerContact', 'saleId', 'saleDocumentNumber', 'clientName',
+          'commissionDate', 'dueDate', 'baseAmount', 'commissionPercent', 'commissionAmount',
+          'paidAmount', 'status', 'paidDate', 'notes', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(commissionId) && existing().ownerId == request.auth.uid;
     }
   }
 }

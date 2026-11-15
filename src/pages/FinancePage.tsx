@@ -29,7 +29,13 @@ import {
   translateStatus,
 } from '../utils/formatters';
 
-export function FinancePage() {
+export function FinancePage({
+  initialTab,
+  onClearInitialTab,
+}: {
+  initialTab?: 'FLUXO' | 'RECEBER' | 'PAGAR' | 'CARTAO';
+  onClearInitialTab?: () => void;
+}) {
   const {
     user,
     payables,
@@ -37,13 +43,25 @@ export function FinancePage() {
     payments,
     sales,
     cardSettlements,
+    commissions,
   } = useAppData();
 
-  const [tab, setTab] = useState<'FLUXO' | 'RECEBER' | 'PAGAR' | 'CARTAO'>('FLUXO');
+  const [tab, setTab] = useState<'FLUXO' | 'RECEBER' | 'PAGAR' | 'CARTAO'>(initialTab || 'FLUXO');
   const [preset, setPreset] = useState<PeriodPreset>('current_month');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const [statusFilter, setStatusFilter] = useState<'TODOS' | 'ABERTO' | 'VENCIDO' | 'PAGO'>('ABERTO');
+  const [payableTypeFilter, setPayableTypeFilter] = useState<'TODOS' | 'BOLETOS' | 'DESPESA' | 'COMISSAO'>('TODOS');
+
+  React.useEffect(() => {
+    if (initialTab) {
+      setTab(initialTab);
+      if (initialTab === 'PAGAR') {
+        setPayableTypeFilter('COMISSAO');
+      }
+      onClearInitialTab?.();
+    }
+  }, [initialTab, onClearInitialTab]);
 
   // Modals
   const [payingPayable, setPayingPayable] = useState<Payable | null>(null);
@@ -125,7 +143,7 @@ export function FinancePage() {
       });
     }
 
-    // Paid payables (Boletos + Expenses)
+    // Paid payables (Boletos + Expenses + Commissions)
     const paidPayables = payables.filter(
       (p) => p.paidAmount > 0 && isDateInRange(p.paidDate || p.dueDate, range.start, range.end)
     );
@@ -134,7 +152,12 @@ export function FinancePage() {
         id: p.id,
         date: p.paidDate || p.dueDate,
         type: 'SAIDA',
-        category: p.type === 'DESPESA' ? 'Despesa' : 'Boleto Marca',
+        category:
+          p.type === 'COMISSAO'
+            ? 'Comissão'
+            : p.type === 'DESPESA'
+              ? 'Despesa'
+              : 'Boleto Marca',
         description: p.description,
         amount: p.paidAmount,
       });
@@ -196,10 +219,20 @@ export function FinancePage() {
         if (statusFilter === 'ABERTO' && p.status === 'PAGO') return false;
         if (statusFilter === 'VENCIDO' && (p.status === 'PAGO' || p.dueDate >= today)) return false;
         if (statusFilter === 'PAGO' && p.status !== 'PAGO') return false;
+        if (payableTypeFilter === 'COMISSAO' && p.type !== 'COMISSAO') return false;
+        if (payableTypeFilter === 'DESPESA' && p.type !== 'DESPESA') return false;
+        if (
+          payableTypeFilter === 'BOLETOS' &&
+          p.type !== 'BOLETO_AVON' &&
+          p.type !== 'BOLETO_NATURA' &&
+          p.type !== 'BOLETO_MISTO'
+        ) {
+          return false;
+        }
         return true;
       })
       .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-  }, [payables, statusFilter, today]);
+  }, [payables, statusFilter, payableTypeFilter, today]);
 
   const sortedCardSettlements = useMemo(
     () =>
@@ -213,7 +246,13 @@ export function FinancePage() {
   const handlePayPayableSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!payingPayable) return;
-    await registerPayablePayment(payingPayable, payPayableAmount, payPayableDate, payPayableNotes);
+    await registerPayablePayment(
+      payingPayable,
+      payPayableAmount,
+      payPayableDate,
+      payPayableNotes,
+      commissions
+    );
     setPayingPayable(null);
   };
 
@@ -337,14 +376,39 @@ export function FinancePage() {
             </div>
 
             {tab === 'PAGAR' && (
-              <button
-                type="button"
-                onClick={() => setShowExpenseModal(true)}
-                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Nova Despesa
-              </button>
+              <>
+                <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-950 p-1">
+                  {(
+                    [
+                      { id: 'TODOS', label: 'Todos Tipos' },
+                      { id: 'BOLETOS', label: 'Boletos' },
+                      { id: 'DESPESA', label: 'Despesas' },
+                      { id: 'COMISSAO', label: 'Comissões' },
+                    ] as const
+                  ).map((tf) => (
+                    <button
+                      key={tf.id}
+                      type="button"
+                      onClick={() => setPayableTypeFilter(tf.id)}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                        payableTypeFilter === tf.id
+                          ? 'bg-zinc-800 text-zinc-100 shadow-xs'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {tf.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowExpenseModal(true)}
+                  className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Nova Despesa
+                </button>
+              </>
             )}
           </div>
         ) : null}
@@ -652,7 +716,14 @@ export function FinancePage() {
                     <div key={p.id} className="space-y-2.5 p-4">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <p className="font-medium text-zinc-100">{p.description}</p>
+                          <p className="font-medium text-zinc-100">
+                            {p.description}
+                            {p.type === 'COMISSAO' && (
+                              <span className="ml-2 inline-block rounded bg-emerald-950/70 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                                Comissão
+                              </span>
+                            )}
+                          </p>
                           <p className="text-xs text-zinc-400">{p.category}</p>
                         </div>
                         <span
@@ -696,7 +767,7 @@ export function FinancePage() {
                           }}
                           className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-zinc-700"
                         >
-                          Registrar Pagamento
+                          {p.type === 'COMISSAO' ? 'Dar Baixa' : 'Registrar Pagamento'}
                         </button>
                       ) : (
                         <p className="text-xs text-emerald-400">
@@ -728,7 +799,14 @@ export function FinancePage() {
                       const isOverdue = p.status !== 'PAGO' && p.dueDate < today;
                       return (
                         <tr key={p.id} className="hover:bg-zinc-800/40">
-                          <td className="px-4 py-3 font-medium text-zinc-100">{p.description}</td>
+                          <td className="px-4 py-3 font-medium text-zinc-100">
+                            {p.description}
+                            {p.type === 'COMISSAO' && (
+                              <span className="ml-2 inline-block rounded bg-emerald-950/70 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                                Comissão
+                              </span>
+                            )}
+                          </td>
                           <td className="px-4 py-3 text-zinc-400">{p.category}</td>
                           <td
                             className={`font-mono-num px-4 py-3 ${
@@ -758,7 +836,7 @@ export function FinancePage() {
                                 }}
                                 className="rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-[11px] font-medium text-zinc-100 hover:bg-zinc-700"
                               >
-                                Registrar Pagamento
+                                {p.type === 'COMISSAO' ? 'Dar Baixa' : 'Registrar Pagamento'}
                               </button>
                             ) : (
                               <span className="text-[11px] text-emerald-400">

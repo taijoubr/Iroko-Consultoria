@@ -56,7 +56,9 @@ export function ReportsPage() {
       (p) => p.paidAmount > 0 && isDateInRange(p.paidDate || p.dueDate, range.start, range.end)
     );
     const pExpenses = payables.filter(
-      (p) => p.type === 'DESPESA' && isDateInRange(p.dueDate, range.start, range.end)
+      (p) =>
+        (p.type === 'DESPESA' || p.type === 'COMISSAO') &&
+        isDateInRange(p.dueDate, range.start, range.end)
     );
     const pConsumptions = personalConsumptions.filter((c) =>
       isDateInRange(c.date, range.start, range.end)

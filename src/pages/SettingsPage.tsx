@@ -24,6 +24,7 @@ export function SettingsPage() {
     payments,
     cardSettlements,
     personalConsumptions,
+    commissions,
   } = useAppData();
 
   const [boletoSurchargePercent, setBoletoSurchargePercent] = useState(5);
@@ -137,6 +138,7 @@ export function SettingsPage() {
       payments,
       cardSettlements,
       personalConsumptions,
+      commissions,
     });
   };
 
@@ -148,6 +150,7 @@ export function SettingsPage() {
       { name: 'Vendas', rows: sales.map((s) => ({ Doc: s.documentNumber, Data: s.saleDate, Cliente: s.clientName, Valor: s.originalSaleAmount, CustoFIFO: s.totalProductCost, Lucro: s.grossProfitOnProducts, Pago: s.paidAmount, Pendente: s.pendingAmount })) },
       { name: 'Contas_Receber', rows: receivables.map((r) => ({ Doc: r.documentNumber, Cliente: r.clientName, Parcela: `${r.installmentNumber}/${r.totalInstallments}`, Vencimento: r.dueDate, Total: r.totalAmount, Pago: r.paidAmount, Status: r.status })) },
       { name: 'Contas_Pagar', rows: payables.map((p) => ({ Descricao: p.description, Vencimento: p.dueDate, Total: p.totalAmount, Pago: p.paidAmount, Status: p.status })) },
+      { name: 'Comissoes', rows: commissions.map((c) => ({ Vendedor: c.sellerName, Venda: c.saleDocumentNumber, Cliente: c.clientName, Vencimento: c.dueDate, Base: c.baseAmount, Percentual: c.commissionPercent, Comissao: c.commissionAmount, Pago: c.paidAmount, Status: c.status })) },
     ]);
   };
 

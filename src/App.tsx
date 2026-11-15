@@ -3,6 +3,7 @@ import { Layout } from './components/Layout';
 import { LoginScreen } from './components/LoginScreen';
 import { AppDataProvider, useAppData } from './context/AppDataContext';
 import { ClientsPage } from './pages/ClientsPage';
+import { CommissionsPage } from './pages/CommissionsPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { FinancePage } from './pages/FinancePage';
 import { InventoryPage } from './pages/InventoryPage';
@@ -24,9 +25,11 @@ function MainApp() {
   } = useAppData();
 
   const [activeModule, setActiveModule] = useState<AppModule>('dashboard');
+  const [financeInitialTab, setFinanceInitialTab] = useState<'FLUXO' | 'RECEBER' | 'PAGAR' | 'CARTAO' | undefined>(undefined);
   const [triggerNewPurchase, setTriggerNewPurchase] = useState(false);
   const [triggerNewClient, setTriggerNewClient] = useState(false);
   const [triggerNewSale, setTriggerNewSale] = useState(false);
+  const [triggerNewCommission, setTriggerNewCommission] = useState(false);
 
   if (authLoading) {
     return (
@@ -74,6 +77,11 @@ function MainApp() {
           label: 'Novo Cliente',
           onClick: () => setTriggerNewClient(true),
         };
+      case 'commissions':
+        return {
+          label: 'Nova Comissão',
+          onClick: () => setTriggerNewCommission(true),
+        };
       default:
         return undefined;
     }
@@ -107,7 +115,22 @@ function MainApp() {
           onClearExternalNew={() => setTriggerNewSale(false)}
         />
       )}
-      {activeModule === 'finance' && <FinancePage />}
+      {activeModule === 'commissions' && (
+        <CommissionsPage
+          externalOpenNew={triggerNewCommission}
+          onClearExternalNew={() => setTriggerNewCommission(false)}
+          onGoToFinancePayables={() => {
+            setFinanceInitialTab('PAGAR');
+            setActiveModule('finance');
+          }}
+        />
+      )}
+      {activeModule === 'finance' && (
+        <FinancePage
+          initialTab={financeInitialTab}
+          onClearInitialTab={() => setFinanceInitialTab(undefined)}
+        />
+      )}
       {activeModule === 'consumption' && <PersonalConsumptionPage />}
       {activeModule === 'reports' && <ReportsPage />}
       {activeModule === 'settings' && <SettingsPage />}

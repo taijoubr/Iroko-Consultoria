@@ -81,10 +81,14 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
       periodSettledCards.reduce((acc, c) => acc + c.feeAmount, 0)
     );
 
-    // Despesas operacionais (não estoque) no período
+    // Despesas operacionais e comissões (não estoque) no período
     const despesasOperacionaisPeriodo = round2(
       payables
-        .filter((p) => p.type === 'DESPESA' && isDateInRange(p.dueDate, range.start, range.end))
+        .filter(
+          (p) =>
+            (p.type === 'DESPESA' || p.type === 'COMISSAO') &&
+            isDateInRange(p.dueDate, range.start, range.end)
+        )
         .reduce((acc, p) => acc + p.totalAmount, 0)
     );
 

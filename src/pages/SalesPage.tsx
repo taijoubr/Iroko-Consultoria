@@ -69,6 +69,7 @@ export function SalesPage({
     receivables,
     payments,
     cardSettlements,
+    commissions,
   } = useAppData();
 
   const [statusFilter, setStatusFilter] = useState<
@@ -124,6 +125,12 @@ export function SalesPage({
   const [ownCreditIntervalDays, setOwnCreditIntervalDays] = useState<number>(30);
   const [customDueDates, setCustomDueDates] = useState<string[]>([]);
   const [notes, setNotes] = useState('');
+  const [hasCommission, setHasCommission] = useState(false);
+  const [commSellerName, setCommSellerName] = useState('');
+  const [commSellerContact, setCommSellerContact] = useState('');
+  const [commPercent, setCommPercent] = useState<number>(10);
+  const [commAmount, setCommAmount] = useState<number>(0);
+  const [commDueDate, setCommDueDate] = useState(getTodayISO());
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -187,6 +194,12 @@ export function SalesPage({
     setOwnCreditIntervalDays(30);
     setCustomDueDates([]);
     setNotes('');
+    setHasCommission(false);
+    setCommSellerName('');
+    setCommSellerContact('');
+    setCommPercent(10);
+    setCommAmount(0);
+    setCommDueDate(getTodayISO());
     setShowNewModal(true);
   };
 
@@ -233,6 +246,12 @@ export function SalesPage({
       saleRecs.filter((r) => r.type === 'CREDITO_PROPRIO').map((r) => r.dueDate)
     );
     setNotes(sale.notes || '');
+    setHasCommission(false);
+    setCommSellerName('');
+    setCommSellerContact('');
+    setCommPercent(10);
+    setCommAmount(0);
+    setCommDueDate(sale.saleDate);
     setSelectedSaleId(null);
     setShowNewModal(true);
   };
@@ -686,6 +705,17 @@ export function SalesPage({
       return;
     }
 
+    if (!editingSale && hasCommission) {
+      if (!commSellerName.trim()) {
+        setFormError('Informe o nome do(a) vendedor(a) para lançar a comissão.');
+        return;
+      }
+      if (commAmount <= 0) {
+        setFormError('Informe um valor de comissão maior que zero.');
+        return;
+      }
+    }
+
     setSubmitting(true);
     try {
       const inputPayload = {
@@ -700,6 +730,18 @@ export function SalesPage({
         ownCreditFirstDueDate,
         customDueDates,
         notes,
+        ...(!editingSale && hasCommission && commSellerName.trim() && commAmount > 0
+          ? {
+              commission: {
+                sellerName: commSellerName,
+                sellerContact: commSellerContact,
+                commissionPercent: commPercent,
+                commissionAmount: commAmount,
+                dueDate: commDueDate || saleDate,
+                notes: '',
+              },
+            }
+          : {}),
       };
 
       if (editingSale) {
@@ -756,7 +798,8 @@ export function SalesPage({
         stockMovements,
         receivables,
         payments,
-        cardSettlements
+        cardSettlements,
+        commissions
       );
       if (selectedSaleId === deleteTargetSale.id) {
         setSelectedSaleId(null);
@@ -2068,6 +2111,124 @@ export function SalesPage({
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {!editingSale && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3.5 space-y-3">
+              <label className="flex items-center justify-between gap-2 text-xs font-medium text-zinc-200 cursor-pointer">
+                <span>Lançar comissão de vendedor(a) nesta venda</span>
+                <input
+                  type="checkbox"
+                  checked={hasCommission}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setHasCommission(checked);
+                    if (checked && originalSaleAmount > 0 && commAmount <= 0) {
+                      setCommAmount(round2((originalSaleAmount * commPercent) / 100));
+                    }
+                  }}
+                  className="accent-emerald-500"
+                />
+              </label>
+
+              {hasCommission && (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-4 pt-1">
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-medium text-zinc-300">
+                      Vendedor(a) *
+                    </label>
+                    <input
+                      type="text"
+                      list="sale-commission-sellers"
+                      value={commSellerName}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setCommSellerName(val);
+                        const match = commissions.find(
+                          (c) => c.sellerName.toLowerCase() === val.trim().toLowerCase() && c.sellerContact
+                        );
+                        if (match && !commSellerContact) {
+                          setCommSellerContact(match.sellerContact);
+                        }
+                      }}
+                      placeholder="Nome de quem vendeu"
+                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                    />
+                    <datalist id="sale-commission-sellers">
+                      {Array.from(new Set(commissions.map((c) => c.sellerName))).map((name) => (
+                        <option key={name} value={name} />
+                      ))}
+                    </datalist>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-medium text-zinc-300">
+                      Comissão (%)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step="0.1"
+                      value={commPercent || ''}
+                      onChange={(e) => {
+                        const pct = Number(e.target.value);
+                        setCommPercent(pct);
+                        if (originalSaleAmount > 0) {
+                          setCommAmount(round2((originalSaleAmount * pct) / 100));
+                        }
+                      }}
+                      className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-medium text-zinc-300">
+                      Valor Comissão (R$) *
+                    </label>
+                    <input
+                      type="number"
+                      min={0.01}
+                      step="0.01"
+                      value={commAmount || ''}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setCommAmount(val);
+                        if (originalSaleAmount > 0 && val >= 0) {
+                          setCommPercent(round2((val / originalSaleAmount) * 100));
+                        }
+                      }}
+                      className="font-mono-num mt-1 w-full rounded-lg border border-emerald-700/70 bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-emerald-300 focus:border-emerald-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-medium text-zinc-300">
+                      WhatsApp / PIX (opcional)
+                    </label>
+                    <input
+                      type="text"
+                      value={commSellerContact}
+                      onChange={(e) => setCommSellerContact(e.target.value)}
+                      placeholder="Para repasse"
+                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-medium text-zinc-300">
+                      Vencimento no Financeiro
+                    </label>
+                    <input
+                      type="date"
+                      value={commDueDate}
+                      onChange={(e) => setCommDueDate(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
