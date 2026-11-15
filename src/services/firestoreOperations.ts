@@ -6,14 +6,15 @@ import {
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type {
   AppSettings,
-  Brand,
   CardSettlement,
   Client,
   DeliveryStatus,
   Payable,
+  Payment,
   PaymentSplit,
   PaymentStatus,
   Product,
+  Purchase,
   PurchaseBrand,
   PurchasePaymentMethod,
   Receivable,
@@ -21,6 +22,7 @@ import type {
   SaleItem,
   SalePaymentMethod,
   StockLot,
+  StockMovement,
 } from '../types';
 import {
   allocateFifoFromLots,
@@ -452,6 +454,457 @@ export async function updatePurchaseMetadata(
   }
 }
 
+export function canFullEditOrDeletePurchase(
+  purchase: Purchase,
+  stockLots: StockLot[],
+  payables: Payable[]
+): { allowed: boolean; reason?: string } {
+  const lots = stockLots.filter((l) => l.purchaseId === purchase.id);
+  const hasStockMovementOut = lots.some(
+    (l) =>
+      l.deliveredQty > 0 ||
+      l.consumedQty > 0 ||
+      l.availableQty + l.reservedQty !== l.initialQty
+  );
+  if (hasStockMovementOut) {
+    return {
+      allowed: false,
+      reason:
+        'Parte dos produtos deste pedido já teve saída no estoque (venda, entrega ou consumo próprio).',
+    };
+  }
+
+  const purchasePayables = payables.filter((p) => p.purchaseId === purchase.id);
+  const hasPaidBoleto =
+    purchase.paymentMethod === 'BOLETO_2X' &&
+    purchasePayables.some((p) => p.paidAmount > 0);
+  if (hasPaidBoleto) {
+    return {
+      allowed: false,
+      reason: 'Este pedido já possui parcela de boleto paga no Financeiro.',
+    };
+  }
+
+  return { allowed: true };
+}
+
+export async function deletePurchase(
+  purchase: Purchase,
+  products: Product[],
+  stockLots: StockLot[],
+  stockMovements: StockMovement[],
+  payables: Payable[]
+): Promise<void> {
+  const check = canFullEditOrDeletePurchase(purchase, stockLots, payables);
+  if (!check.allowed) {
+    throw new Error(check.reason || 'Este pedido não pode ser excluído.');
+  }
+
+  const lots = stockLots.filter((l) => l.purchaseId === purchase.id);
+  const otherLots = stockLots.filter((l) => l.purchaseId !== purchase.id);
+  const movs = stockMovements.filter(
+    (m) => m.referenceType === 'purchase' && m.referenceId === purchase.id
+  );
+  const purchasePayables = payables.filter((p) => p.purchaseId === purchase.id);
+
+  const prodDeltas = new Map<string, { subAvail: number; subRes: number }>();
+  for (const lot of lots) {
+    const cur = prodDeltas.get(lot.productId) || { subAvail: 0, subRes: 0 };
+    cur.subAvail += lot.availableQty;
+    cur.subRes += lot.reservedQty;
+    prodDeltas.set(lot.productId, cur);
+  }
+
+  const batch = writeBatch(db);
+
+  for (const [productId, delta] of prodDeltas.entries()) {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) continue;
+    const nextAvail = prod.availableQty - delta.subAvail;
+    const nextRes = Math.max(0, prod.reservedQty - delta.subRes);
+    const hasOtherLots = otherLots.some((l) => l.productId === productId);
+
+    if (
+      !hasOtherLots &&
+      nextAvail === 0 &&
+      nextRes === 0 &&
+      prod.deliveredQty === 0 &&
+      prod.personalConsumedQty === 0
+    ) {
+      batch.delete(doc(db, 'products', productId));
+    } else {
+      batch.update(doc(db, 'products', productId), {
+        availableQty: nextAvail,
+        reservedQty: nextRes,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  }
+
+  for (const lot of lots) {
+    batch.delete(doc(db, 'stockLots', lot.id));
+  }
+  for (const mov of movs) {
+    batch.delete(doc(db, 'stockMovements', mov.id));
+  }
+  for (const payb of purchasePayables) {
+    batch.delete(doc(db, 'payables', payb.id));
+  }
+  batch.delete(doc(db, 'purchases', purchase.id));
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `purchases/${purchase.id}`);
+  }
+}
+
+export async function updatePurchase(
+  ownerId: string,
+  existingPurchase: Purchase,
+  input: RegisterPurchaseInput,
+  settings: AppSettings,
+  existingProducts: Product[],
+  existingLots: StockLot[],
+  existingMovements: StockMovement[],
+  existingPayables: Payable[]
+): Promise<void> {
+  if (!input.orderNumber.trim()) {
+    throw new Error('Informe o número do pedido.');
+  }
+
+  const check = canFullEditOrDeletePurchase(existingPurchase, existingLots, existingPayables);
+  const oldLots = existingLots.filter((l) => l.purchaseId === existingPurchase.id);
+  const oldPayables = existingPayables.filter((p) => p.purchaseId === existingPurchase.id);
+
+  // If products already left stock or boleto already paid, update only safe metadata
+  if (!check.allowed) {
+    const batch = writeBatch(db);
+    const safeOrderNumber = sanitizeStr(input.orderNumber, 64);
+    batch.update(doc(db, 'purchases', existingPurchase.id), {
+      orderNumber: safeOrderNumber,
+      billingDate: input.billingDate || '',
+      notes: sanitizeStr(input.notes, 400),
+      updatedAt: serverTimestamp(),
+    });
+    for (const lot of oldLots) {
+      if (lot.purchaseOrderNumber !== safeOrderNumber) {
+        batch.update(doc(db, 'stockLots', lot.id), {
+          purchaseOrderNumber: safeOrderNumber,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+    for (const payb of oldPayables) {
+      if (payb.orderNumber !== safeOrderNumber) {
+        batch.update(doc(db, 'payables', payb.id), {
+          orderNumber: safeOrderNumber,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+    try {
+      await batch.commit();
+      return;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `purchases/${existingPurchase.id}`);
+    }
+  }
+
+  if (input.items.length === 0) {
+    throw new Error('Adicione pelo menos um produto na compra.');
+  }
+  for (const item of input.items) {
+    if (!item.name.trim()) throw new Error('Todos os produtos devem possuir um nome.');
+    if (item.quantity <= 0) throw new Error(`Quantidade inválida para ${item.name}.`);
+    if (item.qtyForClients + item.qtyForStock !== item.quantity) {
+      throw new Error(
+        `No produto "${item.name}", a soma de Qtd. para Clientes + Qtd. para Estoque deve ser igual à Quantidade (${item.quantity}).`
+      );
+    }
+  }
+
+  const calc = calculatePurchaseFinancials(
+    input.items,
+    input.paymentMethod,
+    settings.boletoSurchargePercent,
+    input.referenceDate || input.purchaseDate,
+    settings.boletoInstallment1Days,
+    settings.boletoInstallment2Days,
+    input.overrideOriginalTotal
+  );
+
+  // Revert old lot quantities in memory before applying new items
+  const workingProducts = existingProducts.map((p) => ({ ...p }));
+  for (const lot of oldLots) {
+    const wp = workingProducts.find((p) => p.id === lot.productId);
+    if (wp) {
+      wp.availableQty -= lot.availableQty;
+      wp.reservedQty = Math.max(0, wp.reservedQty - lot.reservedQty);
+    }
+  }
+
+  const productAccum = new Map<
+    string,
+    { refId: string; isNew: boolean; prod: Product; addAvail: number; addRes: number }
+  >();
+  // Pre-register reverted existing products that were touched by oldLots so even removed lines get decremented once
+  for (const lot of oldLots) {
+    const wp = workingProducts.find((p) => p.id === lot.productId);
+    if (wp && !productAccum.has(wp.id)) {
+      productAccum.set(wp.id, {
+        refId: wp.id,
+        isNew: false,
+        prod: wp,
+        addAvail: 0,
+        addRes: 0,
+      });
+    }
+  }
+
+  const batch = writeBatch(db);
+  const oldMovs = existingMovements.filter(
+    (m) => m.referenceType === 'purchase' && m.referenceId === existingPurchase.id
+  );
+  for (const lot of oldLots) batch.delete(doc(db, 'stockLots', lot.id));
+  for (const mov of oldMovs) batch.delete(doc(db, 'stockMovements', mov.id));
+  for (const payb of oldPayables) batch.delete(doc(db, 'payables', payb.id));
+
+  const finalizedItems = calc.items.map((item) => {
+    const normalizedName = item.name.trim().toLowerCase();
+    const normalizedCode = item.code.trim().toLowerCase();
+
+    const matched = workingProducts.find(
+      (p) =>
+        p.brand === item.brand &&
+        ((normalizedCode && p.code.trim().toLowerCase() === normalizedCode) ||
+          p.name.trim().toLowerCase() === normalizedName)
+    );
+
+    let productId = matched?.id || '';
+    if (!productId) {
+      const tempKey = `${item.brand}::${normalizedCode || normalizedName}`;
+      const existingNew = Array.from(productAccum.values()).find(
+        (entry) =>
+          entry.prod.brand === item.brand &&
+          ((normalizedCode && entry.prod.code.trim().toLowerCase() === normalizedCode) ||
+            entry.prod.name.trim().toLowerCase() === normalizedName)
+      );
+      if (existingNew) {
+        productId = existingNew.refId;
+      } else {
+        productId = generateId('prd');
+        const newProd: Product = {
+          id: productId,
+          ownerId,
+          name: sanitizeStr(item.name, 160),
+          code: sanitizeStr(item.code, 64),
+          brand: item.brand,
+          category: sanitizeStr(item.category || 'Outros', 80),
+          availableQty: 0,
+          reservedQty: 0,
+          deliveredQty: 0,
+          personalConsumedQty: 0,
+        };
+        productAccum.set(tempKey, {
+          refId: productId,
+          isNew: true,
+          prod: newProd,
+          addAvail: 0,
+          addRes: 0,
+        });
+      }
+    } else if (!productAccum.has(productId)) {
+      productAccum.set(productId, {
+        refId: productId,
+        isNew: false,
+        prod: matched!,
+        addAvail: 0,
+        addRes: 0,
+      });
+    }
+
+    const accumEntry = Array.from(productAccum.values()).find((e) => e.refId === productId)!;
+    accumEntry.addAvail += item.qtyForStock;
+    accumEntry.addRes += item.qtyForClients;
+
+    const lotId = generateId('lot');
+    batch.set(doc(db, 'stockLots', lotId), {
+      ownerId,
+      productId,
+      productName: sanitizeStr(item.name, 160),
+      productCode: sanitizeStr(item.code, 64),
+      brand: item.brand,
+      purchaseId: existingPurchase.id,
+      purchaseOrderNumber: sanitizeStr(input.orderNumber, 64),
+      purchaseDate: input.purchaseDate,
+      initialQty: item.quantity,
+      availableQty: item.qtyForStock,
+      reservedQty: item.qtyForClients,
+      deliveredQty: 0,
+      consumedQty: 0,
+      unitBaseCost: item.unitOriginalCost,
+      unitFinancialCost: item.unitFinancialCost,
+      unitEffectiveCost: item.unitEffectiveCost,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    batch.set(doc(db, 'stockMovements', generateId('mov')), {
+      ownerId,
+      productId,
+      productName: sanitizeStr(item.name, 160),
+      brand: item.brand,
+      lotId,
+      type: 'ENTRADA_COMPRA',
+      quantity: item.quantity,
+      unitBaseCost: item.unitOriginalCost,
+      unitFinancialCost: item.unitFinancialCost,
+      unitEffectiveCost: item.unitEffectiveCost,
+      totalEffectiveCost: item.totalEffectiveCost,
+      referenceType: 'purchase',
+      referenceId: existingPurchase.id,
+      date: input.purchaseDate,
+      notes: sanitizeStr(`Entrada Pedido ${input.orderNumber} (${item.brand})`, 300),
+      createdAt: serverTimestamp(),
+    });
+
+    if (item.qtyForClients > 0) {
+      batch.set(doc(db, 'stockMovements', generateId('mov')), {
+        ownerId,
+        productId,
+        productName: sanitizeStr(item.name, 160),
+        brand: item.brand,
+        lotId,
+        type: 'RESERVA_CLIENTE',
+        quantity: item.qtyForClients,
+        unitBaseCost: item.unitOriginalCost,
+        unitFinancialCost: item.unitFinancialCost,
+        unitEffectiveCost: item.unitEffectiveCost,
+        totalEffectiveCost: round2(item.qtyForClients * item.unitEffectiveCost),
+        referenceType: 'purchase',
+        referenceId: existingPurchase.id,
+        date: input.purchaseDate,
+        notes: sanitizeStr(`Destinado a encomendas de clientes no Pedido ${input.orderNumber}`, 300),
+        createdAt: serverTimestamp(),
+      });
+    }
+
+    return {
+      ...item,
+      productId,
+    };
+  });
+
+  const otherLots = existingLots.filter((l) => l.purchaseId !== existingPurchase.id);
+  for (const entry of productAccum.values()) {
+    const pRef = doc(db, 'products', entry.refId);
+    if (entry.isNew) {
+      batch.set(pRef, {
+        ownerId,
+        name: entry.prod.name,
+        code: entry.prod.code,
+        brand: entry.prod.brand,
+        category: entry.prod.category,
+        availableQty: entry.addAvail,
+        reservedQty: entry.addRes,
+        deliveredQty: 0,
+        personalConsumedQty: 0,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const nextAvail = entry.prod.availableQty + entry.addAvail;
+      const nextRes = entry.prod.reservedQty + entry.addRes;
+      const hasOtherLots = otherLots.some((l) => l.productId === entry.refId);
+      if (
+        !hasOtherLots &&
+        nextAvail === 0 &&
+        nextRes === 0 &&
+        entry.prod.deliveredQty === 0 &&
+        entry.prod.personalConsumedQty === 0
+      ) {
+        batch.delete(pRef);
+      } else {
+        batch.update(pRef, {
+          availableQty: nextAvail,
+          reservedQty: nextRes,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+  }
+
+  batch.update(doc(db, 'purchases', existingPurchase.id), {
+    brand: input.brand,
+    orderNumber: sanitizeStr(input.orderNumber, 64),
+    purchaseDate: input.purchaseDate,
+    billingDate: input.billingDate || '',
+    referenceDate: input.referenceDate || input.purchaseDate,
+    paymentMethod: input.paymentMethod,
+    originalTotal: calc.originalTotal,
+    surchargePercentApplied: calc.surchargePercentApplied,
+    surchargeAmount: calc.surchargeAmount,
+    effectiveTotal: calc.effectiveTotal,
+    financialParamsSnapshot: {
+      refMonthlyInterestRate: settings.refMonthlyInterestRate,
+      refAnnualInterestRate: settings.refAnnualInterestRate,
+      refMonthlyCet: settings.refMonthlyCet,
+      refAnnualCet: settings.refAnnualCet,
+      refIofAmount: settings.refIofAmount,
+      boletoInstallment1Days: settings.boletoInstallment1Days,
+      boletoInstallment2Days: settings.boletoInstallment2Days,
+    },
+    itemsCount: finalizedItems.length,
+    items: finalizedItems,
+    notes: sanitizeStr(input.notes, 400),
+    updatedAt: serverTimestamp(),
+  });
+
+  const payableType =
+    input.brand === 'Avon'
+      ? 'BOLETO_AVON'
+      : input.brand === 'Natura'
+        ? 'BOLETO_NATURA'
+        : 'BOLETO_MISTO';
+
+  for (const inst of calc.installments) {
+    const payableId = generateId('payb');
+    const isVista = input.paymentMethod === 'A_VISTA';
+    batch.set(doc(db, 'payables', payableId), {
+      ownerId,
+      type: payableType,
+      purchaseId: existingPurchase.id,
+      orderNumber: sanitizeStr(input.orderNumber, 64),
+      description: sanitizeStr(
+        isVista
+          ? `Compra ${input.brand} Pedido ${input.orderNumber} (À vista)`
+          : `Boleto ${input.brand} Pedido ${input.orderNumber} (${inst.installmentNumber}/${calc.installments.length})`,
+        200
+      ),
+      installmentNumber: inst.installmentNumber,
+      totalInstallments: calc.installments.length,
+      dueDate: inst.dueDate,
+      originalAmount: inst.originalAmount,
+      interestAmount: inst.interestAmount,
+      totalAmount: inst.totalAmount,
+      paidAmount: isVista ? inst.totalAmount : 0,
+      status: isVista ? 'PAGO' : 'PENDENTE',
+      paidDate: isVista ? input.purchaseDate : '',
+      category: `Compra ${input.brand}`,
+      notes: sanitizeStr(input.notes, 300),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `purchases/${existingPurchase.id}`);
+  }
+}
+
 export async function releaseLotReservationToAvailable(
   ownerId: string,
   product: Product,
@@ -873,6 +1326,493 @@ export async function registerSale(
     return saleId;
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `sales/${saleId}`);
+  }
+}
+
+export function canFullEditSale(
+  sale: Sale,
+  payments: Payment[],
+  cardSettlements: CardSettlement[]
+): { allowed: boolean; reason?: string } {
+  const hasInstallmentPayments = payments.some(
+    (p) => p.saleId === sale.id && p.receivableId !== ''
+  );
+  if (hasInstallmentPayments) {
+    return {
+      allowed: false,
+      reason:
+        'Esta venda já possui baixas/recebimentos de parcelas registrados depois da venda. Você pode alterar observações ou excluí-la por completo.',
+    };
+  }
+  const hasSettledCards = cardSettlements.some(
+    (c) => c.saleId === sale.id && c.status === 'RECEBIDO'
+  );
+  if (hasSettledCards) {
+    return {
+      allowed: false,
+      reason:
+        'Esta venda já possui recebimento de operadora de cartão confirmado. Você pode alterar observações ou excluí-la por completo.',
+    };
+  }
+  return { allowed: true };
+}
+
+export async function deleteSale(
+  sale: Sale,
+  products: Product[],
+  stockLots: StockLot[],
+  stockMovements: StockMovement[],
+  receivables: Receivable[],
+  payments: Payment[],
+  cardSettlements: CardSettlement[]
+): Promise<void> {
+  const batch = writeBatch(db);
+
+  const lotRestores = new Map<string, number>();
+  const productRestores = new Map<string, number>();
+
+  for (const item of sale.items) {
+    productRestores.set(
+      item.productId,
+      (productRestores.get(item.productId) || 0) + item.quantity
+    );
+    for (const alloc of item.lotAllocations) {
+      if (alloc.lotId) {
+        lotRestores.set(
+          alloc.lotId,
+          (lotRestores.get(alloc.lotId) || 0) + alloc.quantity
+        );
+      }
+    }
+  }
+
+  for (const [lotId, qty] of lotRestores.entries()) {
+    const lot = stockLots.find((l) => l.id === lotId);
+    if (!lot) continue;
+    batch.update(doc(db, 'stockLots', lotId), {
+      availableQty: lot.availableQty + qty,
+      ...(sale.deliveryStatus === 'ENTREGUE'
+        ? { deliveredQty: Math.max(0, lot.deliveredQty - qty) }
+        : { reservedQty: Math.max(0, lot.reservedQty - qty) }),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  for (const [productId, qty] of productRestores.entries()) {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) continue;
+    batch.update(doc(db, 'products', productId), {
+      availableQty: prod.availableQty + qty,
+      ...(sale.deliveryStatus === 'ENTREGUE'
+        ? { deliveredQty: Math.max(0, prod.deliveredQty - qty) }
+        : { reservedQty: Math.max(0, prod.reservedQty - qty) }),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  for (const mov of stockMovements) {
+    if (mov.referenceType === 'sale' && mov.referenceId === sale.id) {
+      batch.delete(doc(db, 'stockMovements', mov.id));
+    }
+  }
+  for (const rec of receivables) {
+    if (rec.saleId === sale.id) {
+      batch.delete(doc(db, 'receivables', rec.id));
+    }
+  }
+  for (const pay of payments) {
+    if (pay.saleId === sale.id) {
+      batch.delete(doc(db, 'payments', pay.id));
+    }
+  }
+  for (const card of cardSettlements) {
+    if (card.saleId === sale.id) {
+      batch.delete(doc(db, 'cardSettlements', card.id));
+    }
+  }
+
+  batch.delete(doc(db, 'sales', sale.id));
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `sales/${sale.id}`);
+  }
+}
+
+export async function updateSale(
+  ownerId: string,
+  existingSale: Sale,
+  input: RegisterSaleInput,
+  products: Product[],
+  lots: StockLot[],
+  stockMovements: StockMovement[],
+  receivables: Receivable[],
+  payments: Payment[],
+  cardSettlements: CardSettlement[],
+  settings: AppSettings
+): Promise<void> {
+  const check = canFullEditSale(existingSale, payments, cardSettlements);
+
+  if (!check.allowed) {
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'sales', existingSale.id), {
+      deliveryStatus: existingSale.deliveryStatus,
+      deliveryDate: existingSale.deliveryDate,
+      notes: sanitizeStr(input.notes, 500),
+      updatedAt: serverTimestamp(),
+    });
+    try {
+      await batch.commit();
+      return;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `sales/${existingSale.id}`);
+    }
+  }
+
+  if (!input.client) throw new Error('Selecione um cliente.');
+  if (input.items.length === 0) throw new Error('Adicione ao menos um produto na venda.');
+  if (input.originalSaleAmount <= 0) throw new Error('Informe o valor final da venda.');
+
+  const splitsTotal = round2(input.paymentSplits.reduce((acc, s) => acc + s.amount, 0));
+  if (splitsTotal > round2(input.originalSaleAmount + 0.01)) {
+    throw new Error('A soma das formas de pagamento não pode ultrapassar o valor da venda.');
+  }
+
+  // 1. Revert old sale allocations in memory
+  const workingLots = lots.map((l) => ({ ...l }));
+  const workingProducts = products.map((p) => ({ ...p }));
+
+  for (const oldItem of existingSale.items) {
+    const wp = workingProducts.find((p) => p.id === oldItem.productId);
+    if (wp) {
+      wp.availableQty += oldItem.quantity;
+      if (existingSale.deliveryStatus === 'ENTREGUE') {
+        wp.deliveredQty = Math.max(0, wp.deliveredQty - oldItem.quantity);
+      } else {
+        wp.reservedQty = Math.max(0, wp.reservedQty - oldItem.quantity);
+      }
+    }
+    for (const alloc of oldItem.lotAllocations) {
+      if (alloc.lotId) {
+        const wl = workingLots.find((l) => l.id === alloc.lotId);
+        if (wl) {
+          wl.availableQty += alloc.quantity;
+          if (existingSale.deliveryStatus === 'ENTREGUE') {
+            wl.deliveredQty = Math.max(0, wl.deliveredQty - alloc.quantity);
+          } else {
+            wl.reservedQty = Math.max(0, wl.reservedQty - alloc.quantity);
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Apply new FIFO allocations against reverted stock
+  const saleItems: SaleItem[] = [];
+  for (const reqItem of input.items) {
+    const product = workingProducts.find((p) => p.id === reqItem.productId);
+    if (!product) throw new Error('Produto não encontrado no estoque.');
+
+    const fifo = allocateFifoFromLots(
+      workingLots,
+      product.id,
+      product.name,
+      reqItem.quantity,
+      settings.allowNegativeStock
+    );
+
+    for (const alloc of fifo.allocations) {
+      if (alloc.lotId) {
+        const wLot = workingLots.find((l) => l.id === alloc.lotId);
+        if (wLot) {
+          wLot.availableQty -= alloc.quantity;
+          if (input.deliveryStatus === 'ENTREGUE') {
+            wLot.deliveredQty += alloc.quantity;
+          } else {
+            wLot.reservedQty += alloc.quantity;
+          }
+        }
+      }
+    }
+
+    product.availableQty -= reqItem.quantity;
+    if (input.deliveryStatus === 'ENTREGUE') {
+      product.deliveredQty += reqItem.quantity;
+    } else {
+      product.reservedQty += reqItem.quantity;
+    }
+
+    saleItems.push({
+      productId: product.id,
+      productName: product.name,
+      productCode: product.code,
+      brand: product.brand,
+      quantity: reqItem.quantity,
+      unitBaseCost: fifo.unitBaseCostAvg,
+      unitFinancialCost: fifo.unitFinancialCostAvg,
+      unitEffectiveCost: fifo.unitEffectiveCostAvg,
+      totalCost: fifo.totalEffectiveCost,
+      lotAllocations: fifo.allocations,
+    });
+  }
+
+  const totalProductCost = round2(saleItems.reduce((acc, i) => acc + i.totalCost, 0));
+  const totalBaseCost = round2(
+    saleItems.reduce((acc, i) => acc + i.quantity * i.unitBaseCost, 0)
+  );
+  const totalFinancialCost = round2(
+    saleItems.reduce((acc, i) => acc + i.quantity * i.unitFinancialCost, 0)
+  );
+
+  const ownCreditSplitAmount = round2(
+    input.paymentSplits
+      .filter((s) => s.method === 'CREDITO_PROPRIO')
+      .reduce((acc, s) => acc + s.amount, 0)
+  );
+  const hasOwnCredit = ownCreditSplitAmount > 0;
+  const ownCreditPlan = hasOwnCredit
+    ? calculateOwnCreditPlan(
+        ownCreditSplitAmount,
+        input.ownCreditInterestPercent,
+        input.ownCreditInstallmentsCount,
+        input.ownCreditFirstDueDate
+      )
+    : null;
+
+  const ownCreditInterestAmount = ownCreditPlan ? ownCreditPlan.interestAmount : 0;
+  const ownCreditTotalDue = ownCreditPlan ? ownCreditPlan.totalDue : 0;
+  const totalWithInterest = round2(input.originalSaleAmount + ownCreditInterestAmount);
+
+  const immediateSplits = input.paymentSplits.filter(
+    (s) => s.method !== 'CREDITO_PROPRIO' && s.amount > 0
+  );
+  const immediatePaid = round2(immediateSplits.reduce((acc, s) => acc + s.amount, 0));
+  const pendingAmount = round2(Math.max(0, totalWithInterest - immediatePaid));
+
+  const paymentStatus: PaymentStatus =
+    pendingAmount <= 0.01 ? 'PAGO' : immediatePaid > 0 ? 'PARCIAL' : 'PENDENTE';
+
+  const batch = writeBatch(db);
+
+  // Persist net changes to lots
+  for (const wLot of workingLots) {
+    const orig = lots.find((l) => l.id === wLot.id);
+    if (
+      orig &&
+      (orig.availableQty !== wLot.availableQty ||
+        orig.reservedQty !== wLot.reservedQty ||
+        orig.deliveredQty !== wLot.deliveredQty)
+    ) {
+      batch.update(doc(db, 'stockLots', wLot.id), {
+        availableQty: wLot.availableQty,
+        reservedQty: wLot.reservedQty,
+        deliveredQty: wLot.deliveredQty,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  }
+
+  // Persist net changes to products
+  for (const wProd of workingProducts) {
+    const orig = products.find((p) => p.id === wProd.id);
+    if (
+      orig &&
+      (orig.availableQty !== wProd.availableQty ||
+        orig.reservedQty !== wProd.reservedQty ||
+        orig.deliveredQty !== wProd.deliveredQty)
+    ) {
+      batch.update(doc(db, 'products', wProd.id), {
+        availableQty: wProd.availableQty,
+        reservedQty: wProd.reservedQty,
+        deliveredQty: wProd.deliveredQty,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  }
+
+  // Delete old sale-linked records
+  for (const mov of stockMovements) {
+    if (mov.referenceType === 'sale' && mov.referenceId === existingSale.id) {
+      batch.delete(doc(db, 'stockMovements', mov.id));
+    }
+  }
+  for (const rec of receivables) {
+    if (rec.saleId === existingSale.id) {
+      batch.delete(doc(db, 'receivables', rec.id));
+    }
+  }
+  for (const pay of payments) {
+    if (pay.saleId === existingSale.id) {
+      batch.delete(doc(db, 'payments', pay.id));
+    }
+  }
+  for (const card of cardSettlements) {
+    if (card.saleId === existingSale.id) {
+      batch.delete(doc(db, 'cardSettlements', card.id));
+    }
+  }
+
+  // Recreate stock movements
+  for (const item of saleItems) {
+    for (const alloc of item.lotAllocations) {
+      batch.set(doc(db, 'stockMovements', generateId('mov')), {
+        ownerId,
+        productId: item.productId,
+        productName: item.productName,
+        brand: item.brand,
+        lotId: alloc.lotId,
+        type: input.deliveryStatus === 'ENTREGUE' ? 'SAIDA_VENDA' : 'RESERVA_CLIENTE',
+        quantity: alloc.quantity,
+        unitBaseCost: alloc.unitBaseCost,
+        unitFinancialCost: alloc.unitFinancialCost,
+        unitEffectiveCost: alloc.unitEffectiveCost,
+        totalEffectiveCost: round2(alloc.quantity * alloc.unitEffectiveCost),
+        referenceType: 'sale',
+        referenceId: existingSale.id,
+        date: input.saleDate,
+        notes: sanitizeStr(
+          `${input.deliveryStatus === 'ENTREGUE' ? 'Venda entregue' : 'Venda reservada'} ${existingSale.documentNumber} — ${input.client.fullName}`,
+          300
+        ),
+        createdAt: serverTimestamp(),
+      });
+    }
+  }
+
+  // Update Sale document
+  batch.update(doc(db, 'sales', existingSale.id), {
+    clientId: input.client.id,
+    clientName: sanitizeStr(input.client.fullName, 140),
+    saleDate: input.saleDate,
+    items: saleItems,
+    originalSaleAmount: round2(input.originalSaleAmount),
+    totalProductCost,
+    totalBaseCost,
+    totalFinancialCost,
+    hasOwnCredit,
+    ownCreditAmount: ownCreditSplitAmount,
+    ownCreditInterestPercent: hasOwnCredit ? Number(input.ownCreditInterestPercent) : 0,
+    ownCreditInterestAmount,
+    ownCreditTotalDue,
+    ownCreditInstallmentsCount: ownCreditPlan ? ownCreditPlan.installments.length : 0,
+    totalWithInterest,
+    grossProfitOnProducts: round2(input.originalSaleAmount - totalProductCost),
+    paymentSplits: input.paymentSplits.map((s) => ({
+      method: s.method,
+      amount: round2(s.amount),
+      ...(s.cardInstallments ? { cardInstallments: s.cardInstallments } : {}),
+    })),
+    paidAmount: immediatePaid,
+    pendingAmount,
+    paymentStatus,
+    deliveryStatus: input.deliveryStatus,
+    deliveryDate: input.deliveryStatus === 'ENTREGUE' ? input.saleDate : '',
+    notes: sanitizeStr(input.notes, 500),
+    updatedAt: serverTimestamp(),
+  });
+
+  const docSuffix = existingSale.documentNumber.split('-').pop() || '0001';
+  const year = input.saleDate.slice(0, 4) || String(new Date().getFullYear());
+
+  immediateSplits.forEach((split, idx) => {
+    batch.set(doc(db, 'payments', generateId('pay')), {
+      ownerId,
+      receiptNumber: `REC-${year}-${docSuffix}-${idx + 1}`,
+      saleId: existingSale.id,
+      receivableId: '',
+      clientId: input.client.id,
+      clientName: sanitizeStr(input.client.fullName, 140),
+      paymentDate: input.saleDate,
+      method: split.method,
+      amount: round2(split.amount),
+      principalPortion: round2(split.amount),
+      interestPortion: 0,
+      installmentNumber: 0,
+      totalInstallments: 0,
+      notes: sanitizeStr(`Pagamento na venda ${existingSale.documentNumber}`, 300),
+      createdAt: serverTimestamp(),
+    });
+
+    if (split.method === 'DEBITO' || split.method === 'CREDITO') {
+      batch.set(doc(db, 'cardSettlements', generateId('card')), {
+        ownerId,
+        saleId: existingSale.id,
+        saleDocumentNumber: existingSale.documentNumber,
+        clientName: sanitizeStr(input.client.fullName, 140),
+        saleDate: input.saleDate,
+        cardMethod: split.method,
+        installments: split.cardInstallments || 1,
+        grossCardAmount: round2(split.amount),
+        status: 'AGUARDANDO',
+        settlementDate: '',
+        netDepositedAmount: 0,
+        feeAmount: 0,
+        operatorName: '',
+        notes: '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  });
+
+  if (ownCreditPlan) {
+    ownCreditPlan.installments.forEach((inst, idx) => {
+      const dueDate =
+        input.customDueDates && input.customDueDates[idx]
+          ? input.customDueDates[idx]
+          : inst.dueDate;
+      batch.set(doc(db, 'receivables', generateId('rec')), {
+        ownerId,
+        saleId: existingSale.id,
+        documentNumber: existingSale.documentNumber,
+        clientId: input.client.id,
+        clientName: sanitizeStr(input.client.fullName, 140),
+        type: 'CREDITO_PROPRIO',
+        installmentNumber: inst.installmentNumber,
+        totalInstallments: ownCreditPlan.installments.length,
+        dueDate,
+        principalAmount: inst.principalAmount,
+        interestAmount: inst.interestAmount,
+        totalAmount: inst.totalAmount,
+        paidAmount: 0,
+        status: 'PENDENTE',
+        dueDateHistory: [],
+        notes: '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    });
+  }
+
+  const unallocatedRemainder = round2(input.originalSaleAmount - splitsTotal);
+  if (unallocatedRemainder > 0.01) {
+    batch.set(doc(db, 'receivables', generateId('rec')), {
+      ownerId,
+      saleId: existingSale.id,
+      documentNumber: existingSale.documentNumber,
+      clientId: input.client.id,
+      clientName: sanitizeStr(input.client.fullName, 140),
+      type: 'SALDO_VENDA',
+      installmentNumber: 1,
+      totalInstallments: 1,
+      dueDate: input.ownCreditFirstDueDate || input.saleDate,
+      principalAmount: unallocatedRemainder,
+      interestAmount: 0,
+      totalAmount: unallocatedRemainder,
+      paidAmount: 0,
+      status: 'PENDENTE',
+      dueDateHistory: [],
+      notes: 'Saldo em aberto da venda',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `sales/${existingSale.id}`);
   }
 }
 
@@ -1350,5 +2290,144 @@ export async function registerPersonalConsumption(
     await batch.commit();
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `personalConsumptions/${consumptionId}`);
+  }
+}
+
+export interface PersonalConsumptionBatchItemInput {
+  productId: string;
+  quantity: number;
+  notes?: string;
+}
+
+export async function registerPersonalConsumptionBatch(
+  ownerId: string,
+  items: PersonalConsumptionBatchItemInput[],
+  products: Product[],
+  lots: StockLot[],
+  date: string,
+  defaultNotes: string,
+  allowNegativeStock: boolean
+): Promise<number> {
+  if (!items.length) {
+    throw new Error('Adicione pelo menos um item à lista de consumo próprio.');
+  }
+
+  // Merge duplicate productIds if any, preserving order
+  const mergedItems: PersonalConsumptionBatchItemInput[] = [];
+  for (const item of items) {
+    if (item.quantity <= 0) {
+      throw new Error('Todos os itens da lista devem ter quantidade maior que zero.');
+    }
+    const existing = mergedItems.find((m) => m.productId === item.productId);
+    if (existing) {
+      existing.quantity += item.quantity;
+    } else {
+      mergedItems.push({ ...item });
+    }
+  }
+
+  const workingLots = lots.map((l) => ({ ...l }));
+  const workingProducts = products.map((p) => ({ ...p }));
+  const batch = writeBatch(db);
+
+  for (const item of mergedItems) {
+    const product = workingProducts.find((p) => p.id === item.productId);
+    if (!product) {
+      throw new Error('Um dos produtos da lista não foi encontrado no estoque.');
+    }
+
+    const fifo = allocateFifoFromLots(
+      workingLots,
+      product.id,
+      product.name,
+      item.quantity,
+      allowNegativeStock
+    );
+
+    const consumptionId = generateId('cons');
+    const itemNotes = (item.notes ?? defaultNotes).trim();
+
+    for (const alloc of fifo.allocations) {
+      if (alloc.lotId) {
+        const wLot = workingLots.find((l) => l.id === alloc.lotId);
+        if (wLot) {
+          wLot.availableQty -= alloc.quantity;
+          wLot.consumedQty += alloc.quantity;
+        }
+      }
+
+      batch.set(doc(db, 'stockMovements', generateId('mov')), {
+        ownerId,
+        productId: product.id,
+        productName: product.name,
+        brand: product.brand,
+        lotId: alloc.lotId,
+        type: 'CONSUMO_PROPRIO',
+        quantity: alloc.quantity,
+        unitBaseCost: alloc.unitBaseCost,
+        unitFinancialCost: alloc.unitFinancialCost,
+        unitEffectiveCost: alloc.unitEffectiveCost,
+        totalEffectiveCost: round2(alloc.quantity * alloc.unitEffectiveCost),
+        referenceType: 'consumption',
+        referenceId: consumptionId,
+        date,
+        notes: sanitizeStr(itemNotes || 'Retirada para consumo próprio do administrador', 300),
+        createdAt: serverTimestamp(),
+      });
+    }
+
+    product.availableQty -= item.quantity;
+    product.personalConsumedQty += item.quantity;
+
+    batch.set(doc(db, 'personalConsumptions', consumptionId), {
+      ownerId,
+      date,
+      productId: product.id,
+      productName: product.name,
+      productCode: product.code,
+      brand: product.brand,
+      quantity: item.quantity,
+      unitEffectiveCost: fifo.unitEffectiveCostAvg,
+      totalCost: fifo.totalEffectiveCost,
+      lotAllocations: fifo.allocations,
+      notes: sanitizeStr(itemNotes, 300),
+      createdAt: serverTimestamp(),
+    });
+  }
+
+  for (const wLot of workingLots) {
+    const orig = lots.find((l) => l.id === wLot.id);
+    if (
+      orig &&
+      (orig.availableQty !== wLot.availableQty || orig.consumedQty !== wLot.consumedQty)
+    ) {
+      batch.update(doc(db, 'stockLots', wLot.id), {
+        availableQty: wLot.availableQty,
+        consumedQty: wLot.consumedQty,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  }
+
+  for (const wProd of workingProducts) {
+    const orig = products.find((p) => p.id === wProd.id);
+    if (
+      orig &&
+      (orig.availableQty !== wProd.availableQty ||
+        orig.personalConsumedQty !== wProd.personalConsumedQty)
+    ) {
+      batch.update(doc(db, 'products', wProd.id), {
+        availableQty: wProd.availableQty,
+        personalConsumedQty: wProd.personalConsumedQty,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  }
+
+  try {
+    await batch.commit();
+    return mergedItems.length;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, 'personalConsumptions/batch');
   }
 }

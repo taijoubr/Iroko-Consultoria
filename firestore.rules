@@ -509,9 +509,10 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly([
-          'availableQty', 'reservedQty', 'deliveredQty', 'consumedQty', 'updatedAt'
+          'availableQty', 'reservedQty', 'deliveredQty', 'consumedQty',
+          'purchaseOrderNumber', 'purchaseDate', 'updatedAt'
         ]);
-      allow delete: if false;
+      allow delete: if isAdmin() && isValidId(lotId) && existing().ownerId == request.auth.uid;
     }
 
     match /stockMovements/{movementId} {
@@ -519,7 +520,8 @@ service cloud.firestore {
       allow list: if isBootstrappedAdmin() && resource.data.ownerId == request.auth.uid;
       allow create: if isAdmin() && isValidId(movementId) && isValidStockMovement(incoming())
         && incoming().createdAt == request.time;
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(movementId) && existing().ownerId == request.auth.uid;
     }
 
     match /purchases/{purchaseId} {
@@ -531,8 +533,12 @@ service cloud.firestore {
         && incoming().ownerId == existing().ownerId
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['billingDate', 'notes', 'updatedAt']);
-      allow delete: if false;
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'brand', 'orderNumber', 'purchaseDate', 'billingDate', 'referenceDate',
+          'paymentMethod', 'originalTotal', 'surchargePercentApplied', 'surchargeAmount',
+          'effectiveTotal', 'financialParamsSnapshot', 'itemsCount', 'items', 'notes', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(purchaseId) && existing().ownerId == request.auth.uid;
     }
 
     match /payables/{payableId} {
@@ -546,10 +552,11 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly([
-          'paidAmount', 'status', 'paidDate', 'dueDate', 'notes', 'updatedAt'
+          'orderNumber', 'description', 'paidAmount', 'status', 'paidDate', 'dueDate',
+          'originalAmount', 'interestAmount', 'totalAmount', 'notes', 'updatedAt'
         ]);
       allow delete: if isAdmin() && isValidId(payableId) && existing().ownerId == request.auth.uid
-        && existing().type == 'DESPESA';
+        && existing().type in ['DESPESA', 'BOLETO_AVON', 'BOLETO_NATURA', 'BOLETO_MISTO'];
     }
 
     match /clients/{clientId} {
@@ -576,12 +583,22 @@ service cloud.firestore {
       allow update: if isAdmin() && isValidId(saleId) && isValidSale(incoming())
         && incoming().ownerId == existing().ownerId
         && incoming().createdAt == existing().createdAt
+        && incoming().documentNumber == existing().documentNumber
         && incoming().updatedAt == request.time
         && (
           incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'pendingAmount', 'paymentStatus', 'updatedAt'])
           || incoming().diff(existing()).affectedKeys().hasOnly(['deliveryStatus', 'deliveryDate', 'notes', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'clientId', 'clientName', 'saleDate', 'items', 'originalSaleAmount',
+            'totalProductCost', 'totalBaseCost', 'totalFinancialCost',
+            'hasOwnCredit', 'ownCreditAmount', 'ownCreditInterestPercent',
+            'ownCreditInterestAmount', 'ownCreditTotalDue', 'ownCreditInstallmentsCount',
+            'totalWithInterest', 'grossProfitOnProducts', 'paymentSplits',
+            'paidAmount', 'pendingAmount', 'paymentStatus',
+            'deliveryStatus', 'deliveryDate', 'notes', 'updatedAt'
+          ])
         );
-      allow delete: if false;
+      allow delete: if isAdmin() && isValidId(saleId) && existing().ownerId == request.auth.uid;
     }
 
     match /receivables/{receivableId} {
@@ -598,7 +615,7 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'updatedAt'])
           || incoming().diff(existing()).affectedKeys().hasOnly(['dueDate', 'dueDateHistory', 'notes', 'updatedAt'])
         );
-      allow delete: if false;
+      allow delete: if isAdmin() && isValidId(receivableId) && existing().ownerId == request.auth.uid;
     }
 
     match /payments/{paymentId} {
@@ -608,7 +625,8 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && existsAfter(/databases/$(database)/documents/sales/$(incoming().saleId))
         && (incoming().receivableId == '' || existsAfter(/databases/$(database)/documents/receivables/$(incoming().receivableId)));
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(paymentId) && existing().ownerId == request.auth.uid;
     }
 
     match /cardSettlements/{settlementId} {
@@ -624,7 +642,7 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'status', 'settlementDate', 'netDepositedAmount', 'feeAmount', 'operatorName', 'notes', 'updatedAt'
         ]);
-      allow delete: if false;
+      allow delete: if isAdmin() && isValidId(settlementId) && existing().ownerId == request.auth.uid;
     }
 
     match /personalConsumptions/{consumptionId} {

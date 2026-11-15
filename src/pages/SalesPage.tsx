@@ -4,18 +4,22 @@ import {
   CheckCircle2,
   Eye,
   FileText,
+  Pencil,
   Plus,
   Trash2,
 } from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
 import {
+  canFullEditSale,
+  deleteSale,
   markSaleAsDelivered,
   registerAdvanceFullPayment,
   registerReceivablePayment,
   registerSale,
   saveClient,
   updateReceivableDueDate,
+  updateSale,
 } from '../services/firestoreOperations';
 import type {
   DeliveryStatus,
@@ -53,10 +57,12 @@ export function SalesPage({
     settings,
     products,
     stockLots,
+    stockMovements,
     clients,
     sales,
     receivables,
     payments,
+    cardSettlements,
   } = useAppData();
 
   const [statusFilter, setStatusFilter] = useState<
@@ -66,7 +72,12 @@ export function SalesPage({
 
   // Modals
   const [showNewModal, setShowNewModal] = useState(false);
+  const [editingSale, setEditingSale] = useState<Sale | null>(null);
+  const [deleteTargetSale, setDeleteTargetSale] = useState<Sale | null>(null);
+  const [deletingSale, setDeletingSale] = useState(false);
+  const [deleteSaleError, setDeleteSaleError] = useState<string | null>(null);
   const [selectedSaleId, setSelectedSaleId] = useState<string | null>(null);
+  const skipDueDatesSyncRef = React.useRef(false);
 
   // Quick inline client creation inside sale modal
   const [quickClientOpen, setQuickClientOpen] = useState(false);
@@ -116,6 +127,8 @@ export function SalesPage({
   }, [externalOpenNew, onClearExternalNew]);
 
   const openNewSaleModal = () => {
+    skipDueDatesSyncRef.current = false;
+    setEditingSale(null);
     setFormError(null);
     setClientId(clients[0]?.id || '');
     setSaleDate(getTodayISO());
@@ -133,11 +146,90 @@ export function SalesPage({
     setShowNewModal(true);
   };
 
-  // Live FIFO Cost Preview (computed automatically, user never enters cost/profit manually)
+  const openEditSale = (sale: Sale) => {
+    const saleRecs = receivables
+      .filter((r) => r.saleId === sale.id)
+      .sort((a, b) => a.installmentNumber - b.installmentNumber);
+
+    skipDueDatesSyncRef.current = sale.hasOwnCredit && saleRecs.length > 0;
+    setEditingSale(sale);
+    setFormError(null);
+    setQuickClientOpen(false);
+    setClientId(sale.clientId);
+    setSaleDate(sale.saleDate);
+    setDeliveryStatus(sale.deliveryStatus);
+    setSaleItems(
+      sale.items.map((it) => ({
+        productId: it.productId,
+        quantity: it.quantity,
+      }))
+    );
+    setOriginalSaleAmount(sale.originalSaleAmount);
+    setPaymentSplits(
+      sale.paymentSplits.length > 0
+        ? sale.paymentSplits.map((sp) => ({ ...sp }))
+        : [{ method: 'PIX', amount: 0 }]
+    );
+    setOwnCreditInterestPercent(sale.ownCreditInterestPercent || 0);
+    setOwnCreditInstallmentsCount(
+      sale.hasOwnCredit && sale.ownCreditInstallmentsCount > 0
+        ? sale.ownCreditInstallmentsCount
+        : 2
+    );
+    setOwnCreditFirstDueDate(saleRecs[0]?.dueDate || addMonthsISO(sale.saleDate, 1));
+    setOwnCreditIntervalType('MONTHLY');
+    setOwnCreditIntervalDays(30);
+    setCustomDueDates(
+      saleRecs.filter((r) => r.type === 'CREDITO_PROPRIO').map((r) => r.dueDate)
+    );
+    setNotes(sale.notes || '');
+    setSelectedSaleId(null);
+    setShowNewModal(true);
+  };
+
+  const editSaleEligibility = useMemo(() => {
+    if (!editingSale) return { allowed: true };
+    return canFullEditSale(editingSale, payments, cardSettlements);
+  }, [editingSale, payments, cardSettlements]);
+
+  const effectiveAvailableByProduct = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const p of products) {
+      map.set(p.id, p.availableQty);
+    }
+    if (editingSale) {
+      for (const it of editingSale.items) {
+        map.set(it.productId, (map.get(it.productId) ?? 0) + it.quantity);
+      }
+    }
+    return map;
+  }, [products, editingSale]);
+
+  // Live FIFO Cost Preview (computed automatically; reverts current sale's own lots when editing)
   const liveCostPreview = useMemo(() => {
     if (!settings) return { totalCost: 0, error: null as string | null };
+    if (editingSale && !editSaleEligibility.allowed) {
+      return { totalCost: editingSale.totalProductCost, error: null };
+    }
     try {
       const workingLots = stockLots.map((l) => ({ ...l }));
+      if (editingSale) {
+        for (const oldItem of editingSale.items) {
+          for (const alloc of oldItem.lotAllocations) {
+            if (alloc.lotId) {
+              const wl = workingLots.find((l) => l.id === alloc.lotId);
+              if (wl) {
+                wl.availableQty += alloc.quantity;
+                if (editingSale.deliveryStatus === 'ENTREGUE') {
+                  wl.deliveredQty = Math.max(0, wl.deliveredQty - alloc.quantity);
+                } else {
+                  wl.reservedQty = Math.max(0, wl.reservedQty - alloc.quantity);
+                }
+              }
+            }
+          }
+        }
+      }
       let sum = 0;
       for (const it of saleItems) {
         if (!it.productId || it.quantity <= 0) continue;
@@ -163,7 +255,7 @@ export function SalesPage({
         error: err instanceof Error ? err.message : 'Erro no cálculo de estoque',
       };
     }
-  }, [saleItems, products, stockLots, settings]);
+  }, [saleItems, products, stockLots, settings, editingSale, editSaleEligibility.allowed]);
 
   const ownCreditAmount = useMemo(
     () =>
@@ -195,6 +287,10 @@ export function SalesPage({
   ]);
 
   React.useEffect(() => {
+    if (skipDueDatesSyncRef.current) {
+      skipDueDatesSyncRef.current = false;
+      return;
+    }
     if (ownCreditPlan) {
       setCustomDueDates(ownCreditPlan.installments.map((i) => i.dueDate));
     } else {
@@ -300,32 +396,84 @@ export function SalesPage({
 
     setSubmitting(true);
     try {
-      const newSaleId = await registerSale(
-        user.uid,
-        {
-          client: selectedClientObj,
-          saleDate,
-          items: validItems,
-          originalSaleAmount,
-          deliveryStatus,
-          paymentSplits: paymentSplits.filter((s) => s.amount > 0),
-          ownCreditInterestPercent,
-          ownCreditInstallmentsCount,
-          ownCreditFirstDueDate,
-          customDueDates,
-          notes,
-        },
-        products,
-        stockLots,
-        settings,
-        sales.length
-      );
-      setShowNewModal(false);
-      setSelectedSaleId(newSaleId);
+      const inputPayload = {
+        client: selectedClientObj,
+        saleDate,
+        items: validItems,
+        originalSaleAmount,
+        deliveryStatus,
+        paymentSplits: paymentSplits.filter((s) => s.amount > 0),
+        ownCreditInterestPercent,
+        ownCreditInstallmentsCount,
+        ownCreditFirstDueDate,
+        customDueDates,
+        notes,
+      };
+
+      if (editingSale) {
+        await updateSale(
+          user.uid,
+          editingSale,
+          inputPayload,
+          products,
+          stockLots,
+          stockMovements,
+          receivables,
+          payments,
+          cardSettlements,
+          settings
+        );
+        const savedId = editingSale.id;
+        setShowNewModal(false);
+        setEditingSale(null);
+        setSelectedSaleId(savedId);
+      } else {
+        const newSaleId = await registerSale(
+          user.uid,
+          inputPayload,
+          products,
+          stockLots,
+          settings,
+          sales.length
+        );
+        setShowNewModal(false);
+        setSelectedSaleId(newSaleId);
+      }
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Erro ao registrar venda.');
+      setFormError(
+        err instanceof Error
+          ? err.message
+          : editingSale
+            ? 'Erro ao atualizar venda.'
+            : 'Erro ao registrar venda.'
+      );
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleConfirmDeleteSale = async () => {
+    if (!deleteTargetSale) return;
+    setDeleteSaleError(null);
+    setDeletingSale(true);
+    try {
+      await deleteSale(
+        deleteTargetSale,
+        products,
+        stockLots,
+        stockMovements,
+        receivables,
+        payments,
+        cardSettlements
+      );
+      if (selectedSaleId === deleteTargetSale.id) {
+        setSelectedSaleId(null);
+      }
+      setDeleteTargetSale(null);
+    } catch (err) {
+      setDeleteSaleError(err instanceof Error ? err.message : 'Erro ao excluir venda.');
+    } finally {
+      setDeletingSale(false);
     }
   };
 
@@ -445,14 +593,37 @@ export function SalesPage({
                         {s.items.map((i) => `${i.quantity}x ${i.productName}`).join(', ')}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedSaleId(s.id)}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
-                    >
-                      <Eye className="h-3.5 w-3.5" />
-                      Gerenciar
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => openEditSale(s)}
+                        aria-label="Editar venda"
+                        title="Editar venda"
+                        className="rounded-lg border border-zinc-700 bg-zinc-950/60 p-1.5 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteSaleError(null);
+                          setDeleteTargetSale(s);
+                        }}
+                        aria-label="Excluir venda"
+                        title="Excluir venda"
+                        className="rounded-lg border border-zinc-700 bg-zinc-950/60 p-1.5 text-zinc-400 hover:border-red-900/60 hover:bg-red-950/40 hover:text-red-400"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSaleId(s.id)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950/60 px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        Gerenciar
+                      </button>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-3 gap-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2.5 text-[11px]">
@@ -568,14 +739,37 @@ export function SalesPage({
                         {formatCurrency(s.pendingAmount)}
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedSaleId(s.id)}
-                          className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-950/60 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                          Gerenciar
-                        </button>
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => openEditSale(s)}
+                            title="Editar venda"
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            Editar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeleteSaleError(null);
+                              setDeleteTargetSale(s);
+                            }}
+                            title="Excluir venda"
+                            aria-label="Excluir venda"
+                            className="inline-flex items-center rounded-md border border-zinc-700 bg-zinc-950/60 p-1 text-zinc-400 hover:border-red-900/60 hover:bg-red-950/40 hover:text-red-400"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedSaleId(s.id)}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-950/60 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            Gerenciar
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -586,12 +780,19 @@ export function SalesPage({
         )}
       </div>
 
-      {/* New Sale Modal */}
+      {/* New / Edit Sale Modal */}
       <Modal
         open={showNewModal}
-        onClose={() => setShowNewModal(false)}
-        title="Registrar Nova Venda"
-        subtitle="Informe somente os produtos e o valor final da venda. O custo FIFO e o lucro são calculados automaticamente."
+        onClose={() => {
+          setShowNewModal(false);
+          setEditingSale(null);
+        }}
+        title={editingSale ? `Editar Venda ${editingSale.documentNumber}` : 'Registrar Nova Venda'}
+        subtitle={
+          editingSale
+            ? 'Altere os itens, cliente ou condições. O estoque FIFO e os recebimentos são recalculados automaticamente.'
+            : 'Informe somente os produtos e o valor final da venda. O custo FIFO e o lucro são calculados automaticamente.'
+        }
         maxWidth="4xl"
       >
         <form onSubmit={handleSubmitSale} className="space-y-5">
@@ -601,24 +802,33 @@ export function SalesPage({
             </div>
           )}
 
+          {editingSale && !editSaleEligibility.allowed && (
+            <div className="rounded-lg border border-amber-800/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
+              {editSaleEligibility.reason} Por segurança, apenas o campo de Observações pode ser editado diretamente aqui.
+            </div>
+          )}
+
           {/* Client, Date, Delivery */}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <div className="sm:col-span-2">
               <div className="flex items-center justify-between">
                 <label className="block text-xs font-medium text-zinc-300">Cliente *</label>
-                <button
-                  type="button"
-                  onClick={() => setQuickClientOpen((v) => !v)}
-                  className="text-[11px] font-medium text-emerald-400 hover:underline"
-                >
-                  {quickClientOpen ? 'Fechar cadastro rápido' : '+ Cadastro rápido'}
-                </button>
+                {!(editingSale && !editSaleEligibility.allowed) && (
+                  <button
+                    type="button"
+                    onClick={() => setQuickClientOpen((v) => !v)}
+                    className="text-[11px] font-medium text-emerald-400 hover:underline"
+                  >
+                    {quickClientOpen ? 'Fechar cadastro rápido' : '+ Cadastro rápido'}
+                  </button>
+                )}
               </div>
               <select
                 required
+                disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                 value={clientId}
                 onChange={(e) => setClientId(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               >
                 <option value="">Selecione um cliente...</option>
                 {clients.map((c) => (
@@ -634,9 +844,10 @@ export function SalesPage({
               <input
                 type="date"
                 required
+                disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                 value={saleDate}
                 onChange={(e) => setSaleDate(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               />
             </div>
 
@@ -644,8 +855,9 @@ export function SalesPage({
               <label className="block text-xs font-medium text-zinc-300">Situação da Entrega</label>
               <select
                 value={deliveryStatus}
+                disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                 onChange={(e) => setDeliveryStatus(e.target.value as DeliveryStatus)}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               >
                 <option value="ENTREGUE">Entregue no ato</option>
                 <option value="RESERVADO">Reservado para entrega</option>
@@ -694,13 +906,14 @@ export function SalesPage({
               </h3>
               <button
                 type="button"
+                disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                 onClick={() =>
                   setSaleItems((prev) => [
                     ...prev,
                     { productId: products[0]?.id || '', quantity: 1 },
                   ])
                 }
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700"
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
               >
                 <Plus className="h-3.5 w-3.5" />
                 Adicionar Produto
@@ -709,11 +922,14 @@ export function SalesPage({
 
             {saleItems.map((item, idx) => {
               const prod = products.find((p) => p.id === item.productId);
+              const isLockedSale = Boolean(editingSale && !editSaleEligibility.allowed);
+              const availQty = prod ? (effectiveAvailableByProduct.get(prod.id) ?? prod.availableQty) : 0;
               return (
                 <div key={idx} className="grid grid-cols-12 gap-2">
                   <div className="col-span-12 sm:col-span-9">
                     <select
                       required
+                      disabled={isLockedSale}
                       value={item.productId}
                       onChange={(e) =>
                         setSaleItems((prev) =>
@@ -722,12 +938,13 @@ export function SalesPage({
                           )
                         )
                       }
-                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100"
+                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 disabled:opacity-50"
                     >
                       <option value="">Selecione um produto do estoque...</option>
                       {products.map((p) => (
                         <option key={p.id} value={p.id}>
-                          {p.brand} · {p.name} {p.code ? `(${p.code})` : ''} — Disp.: {p.availableQty} un.
+                          {p.brand} · {p.name} {p.code ? `(${p.code})` : ''} — Disp.:{' '}
+                          {effectiveAvailableByProduct.get(p.id) ?? p.availableQty} un.
                         </option>
                       ))}
                     </select>
@@ -737,6 +954,7 @@ export function SalesPage({
                       type="number"
                       min={1}
                       required
+                      disabled={isLockedSale}
                       value={item.quantity}
                       onChange={(e) =>
                         setSaleItems((prev) =>
@@ -746,18 +964,18 @@ export function SalesPage({
                         )
                       }
                       aria-label="Quantidade"
-                      className="font-mono-num w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100"
+                      className="font-mono-num w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 disabled:opacity-50"
                     />
                     {prod && (
                       <span className="block pt-0.5 text-[10px] text-zinc-500">
-                        Disp: {prod.availableQty}
+                        Disp: {availQty}
                       </span>
                     )}
                   </div>
                   <div className="col-span-3 flex items-start justify-end pt-1 sm:col-span-1">
                     <button
                       type="button"
-                      disabled={saleItems.length === 1}
+                      disabled={isLockedSale || saleItems.length === 1}
                       onClick={() =>
                         setSaleItems((prev) =>
                           prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev
@@ -788,10 +1006,11 @@ export function SalesPage({
                 min={0.01}
                 step="0.01"
                 required
+                disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                 value={originalSaleAmount || ''}
                 onChange={(e) => handleSaleAmountChange(Number(e.target.value))}
                 placeholder="0,00"
-                className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm font-semibold text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm font-semibold text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               />
             </div>
 
@@ -836,6 +1055,7 @@ export function SalesPage({
               </div>
               <button
                 type="button"
+                disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                 onClick={() =>
                   setPaymentSplits((prev) => [
                     ...prev,
@@ -845,99 +1065,105 @@ export function SalesPage({
                     },
                   ])
                 }
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
               >
                 <Plus className="h-3.5 w-3.5" />
                 Adicionar Forma
               </button>
             </div>
 
-            {paymentSplits.map((split, idx) => (
-              <div key={idx} className="grid grid-cols-12 gap-2">
-                <div className="col-span-12 sm:col-span-5">
-                  <select
-                    value={split.method}
-                    onChange={(e) =>
-                      setPaymentSplits((prev) =>
-                        prev.map((sp, i) =>
-                          i === idx
-                            ? {
-                                ...sp,
-                                method: e.target.value as SalePaymentMethod,
-                                cardInstallments: e.target.value === 'CREDITO' ? 1 : undefined,
-                              }
-                            : sp
-                        )
-                      )
-                    }
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
-                  >
-                    <option value="PIX">PIX</option>
-                    <option value="DINHEIRO">Dinheiro</option>
-                    <option value="DEBITO">Cartão de Débito</option>
-                    <option value="CREDITO">Cartão de Crédito</option>
-                    <option value="CREDITO_PROPRIO">Crédito Próprio (Parcelado)</option>
-                  </select>
-                </div>
-
-                <div className="col-span-7 sm:col-span-4">
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={split.amount || ''}
-                    onChange={(e) =>
-                      setPaymentSplits((prev) =>
-                        prev.map((sp, i) =>
-                          i === idx ? { ...sp, amount: Number(e.target.value) } : sp
-                        )
-                      )
-                    }
-                    placeholder="Valor (R$)"
-                    className="font-mono-num w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
-                  />
-                </div>
-
-                {split.method === 'CREDITO' ? (
-                  <div className="col-span-3 sm:col-span-2">
-                    <input
-                      type="number"
-                      min={1}
-                      max={18}
-                      value={split.cardInstallments || 1}
+            {paymentSplits.map((split, idx) => {
+              const isLockedSale = Boolean(editingSale && !editSaleEligibility.allowed);
+              return (
+                <div key={idx} className="grid grid-cols-12 gap-2">
+                  <div className="col-span-12 sm:col-span-5">
+                    <select
+                      value={split.method}
+                      disabled={isLockedSale}
                       onChange={(e) =>
                         setPaymentSplits((prev) =>
                           prev.map((sp, i) =>
                             i === idx
-                              ? { ...sp, cardInstallments: Math.max(1, Number(e.target.value)) }
+                              ? {
+                                  ...sp,
+                                  method: e.target.value as SalePaymentMethod,
+                                  cardInstallments: e.target.value === 'CREDITO' ? 1 : undefined,
+                                }
                               : sp
                           )
                         )
                       }
-                      title="Parcelas no cartão"
-                      className="font-mono-num w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
+                    >
+                      <option value="PIX">PIX</option>
+                      <option value="DINHEIRO">Dinheiro</option>
+                      <option value="DEBITO">Cartão de Débito</option>
+                      <option value="CREDITO">Cartão de Crédito</option>
+                      <option value="CREDITO_PROPRIO">Crédito Próprio (Parcelado)</option>
+                    </select>
+                  </div>
+
+                  <div className="col-span-7 sm:col-span-4">
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      disabled={isLockedSale}
+                      value={split.amount || ''}
+                      onChange={(e) =>
+                        setPaymentSplits((prev) =>
+                          prev.map((sp, i) =>
+                            i === idx ? { ...sp, amount: Number(e.target.value) } : sp
+                          )
+                        )
+                      }
+                      placeholder="Valor (R$)"
+                      className="font-mono-num w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
                     />
                   </div>
-                ) : (
-                  <div className="col-span-3 sm:col-span-2" />
-                )}
 
-                <div className="col-span-2 flex items-center justify-end sm:col-span-1">
-                  <button
-                    type="button"
-                    disabled={paymentSplits.length === 1}
-                    onClick={() =>
-                      setPaymentSplits((prev) =>
-                        prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev
-                      )
-                    }
-                    className="rounded p-1.5 text-zinc-500 hover:bg-red-950/60 hover:text-red-400 disabled:opacity-30"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                  {split.method === 'CREDITO' ? (
+                    <div className="col-span-3 sm:col-span-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={18}
+                        disabled={isLockedSale}
+                        value={split.cardInstallments || 1}
+                        onChange={(e) =>
+                          setPaymentSplits((prev) =>
+                            prev.map((sp, i) =>
+                              i === idx
+                                ? { ...sp, cardInstallments: Math.max(1, Number(e.target.value)) }
+                                : sp
+                            )
+                          )
+                        }
+                        title="Parcelas no cartão"
+                        className="font-mono-num w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
+                      />
+                    </div>
+                  ) : (
+                    <div className="col-span-3 sm:col-span-2" />
+                  )}
+
+                  <div className="col-span-2 flex items-center justify-end sm:col-span-1">
+                    <button
+                      type="button"
+                      disabled={isLockedSale || paymentSplits.length === 1}
+                      onClick={() =>
+                        setPaymentSplits((prev) =>
+                          prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev
+                        )
+                      }
+                      className="rounded p-1.5 text-zinc-500 hover:bg-red-950/60 hover:text-red-400 disabled:opacity-30"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Crédito Próprio Configuration Panel */}
@@ -963,9 +1189,10 @@ export function SalesPage({
                     type="number"
                     min={0}
                     step="0.1"
+                    disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                     value={ownCreditInterestPercent}
                     onChange={(e) => setOwnCreditInterestPercent(Number(e.target.value))}
-                    className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                    className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
                   />
                 </div>
                 <div>
@@ -976,11 +1203,12 @@ export function SalesPage({
                     type="number"
                     min={1}
                     max={24}
+                    disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                     value={ownCreditInstallmentsCount}
                     onChange={(e) =>
                       setOwnCreditInstallmentsCount(Math.max(1, Number(e.target.value)))
                     }
-                    className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                    className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
                   />
                 </div>
                 <div>
@@ -989,9 +1217,10 @@ export function SalesPage({
                   </label>
                   <input
                     type="date"
+                    disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                     value={ownCreditFirstDueDate}
                     onChange={(e) => setOwnCreditFirstDueDate(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                    className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
                   />
                 </div>
                 <div>
@@ -1001,10 +1230,11 @@ export function SalesPage({
                   <div className="mt-1 flex gap-1.5">
                     <select
                       value={ownCreditIntervalType}
+                      disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                       onChange={(e) =>
                         setOwnCreditIntervalType(e.target.value as OwnCreditIntervalType)
                       }
-                      className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                      className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
                     >
                       <option value="MONTHLY">Mensal</option>
                       <option value="DAYS">A cada X dias</option>
@@ -1014,20 +1244,21 @@ export function SalesPage({
                         type="number"
                         min={1}
                         max={365}
+                        disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                         value={ownCreditIntervalDays}
                         onChange={(e) =>
                           setOwnCreditIntervalDays(Math.max(1, Number(e.target.value)))
                         }
                         title="Dias entre cada parcela"
                         aria-label="Dias entre cada parcela"
-                        className="font-mono-num w-16 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                        className="font-mono-num w-16 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
                       />
                     )}
                   </div>
                 </div>
               </div>
 
-              {ownCreditIntervalType === 'DAYS' && (
+              {ownCreditIntervalType === 'DAYS' && !(editingSale && !editSaleEligibility.allowed) && (
                 <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-400">
                   <span>Atalhos de intervalo:</span>
                   {[7, 15, 20, 30, 45].map((days) => (
@@ -1058,13 +1289,14 @@ export function SalesPage({
                     </span>
                     <input
                       type="date"
+                      disabled={Boolean(editingSale && !editSaleEligibility.allowed)}
                       value={customDueDates[idx] || inst.dueDate}
                       onChange={(e) =>
                         setCustomDueDates((prev) =>
                           prev.map((d, i) => (i === idx ? e.target.value : d))
                         )
                       }
-                      className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-[11px] text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                      className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-[11px] text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
                     />
                   </div>
                 ))}
@@ -1085,7 +1317,10 @@ export function SalesPage({
           <div className="flex justify-end gap-2 border-t border-zinc-800 pt-4">
             <button
               type="button"
-              onClick={() => setShowNewModal(false)}
+              onClick={() => {
+                setShowNewModal(false);
+                setEditingSale(null);
+              }}
               className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
             >
               Cancelar
@@ -1095,7 +1330,11 @@ export function SalesPage({
               disabled={submitting || Boolean(liveCostPreview.error)}
               className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-60"
             >
-              {submitting ? 'Registrando...' : 'Confirmar Venda'}
+              {submitting
+                ? 'Salvando...'
+                : editingSale
+                  ? 'Salvar Alterações'
+                  : 'Confirmar Venda'}
             </button>
           </div>
         </form>
@@ -1178,6 +1417,25 @@ export function SalesPage({
                     Marcar Entregue
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => openEditSale(selectedSale)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  Editar Venda
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeleteSaleError(null);
+                    setDeleteTargetSale(selectedSale);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/60"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Excluir Venda
+                </button>
                 <button
                   type="button"
                   onClick={() =>
@@ -1511,6 +1769,60 @@ export function SalesPage({
                   </table>
                 </div>
               )}
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Delete Sale Confirmation Modal */}
+      <Modal
+        open={Boolean(deleteTargetSale)}
+        onClose={() => {
+          if (!deletingSale) {
+            setDeleteTargetSale(null);
+            setDeleteSaleError(null);
+          }
+        }}
+        title="Excluir Venda"
+        subtitle={
+          deleteTargetSale
+            ? `${deleteTargetSale.documentNumber} · ${deleteTargetSale.clientName} (${formatCurrency(deleteTargetSale.originalSaleAmount)})`
+            : undefined
+        }
+        maxWidth="md"
+      >
+        {deleteTargetSale && (
+          <div className="space-y-4">
+            {deleteSaleError && (
+              <div className="rounded-lg border border-red-900/60 bg-red-950/50 px-3 py-2 text-xs text-red-300">
+                {deleteSaleError}
+              </div>
+            )}
+
+            <p className="text-xs text-zinc-300">
+              Tem certeza que deseja excluir esta venda? Os produtos vendidos/reservados retornarão automaticamente para o estoque FIFO disponível e os lançamentos financeiros (recebíveis, pagamentos e recebimentos de cartão) vinculados a esta venda serão removidos.
+            </p>
+
+            <div className="flex justify-end gap-2 border-t border-zinc-800 pt-3">
+              <button
+                type="button"
+                disabled={deletingSale}
+                onClick={() => {
+                  setDeleteTargetSale(null);
+                  setDeleteSaleError(null);
+                }}
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deletingSale}
+                onClick={handleConfirmDeleteSale}
+                className="rounded-lg bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-60"
+              >
+                {deletingSale ? 'Excluindo...' : 'Confirmar Exclusão'}
+              </button>
             </div>
           </div>
         )}

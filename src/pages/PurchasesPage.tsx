@@ -1,10 +1,13 @@
 import React, { useMemo, useState } from 'react';
-import { Eye, Plus, Trash2 } from 'lucide-react';
+import { Eye, Pencil, Plus, Trash2 } from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
 import { useAppData } from '../context/AppDataContext';
 import {
+  canFullEditOrDeletePurchase,
   DEFAULT_CATEGORIES,
+  deletePurchase,
   registerPurchase,
+  updatePurchase,
   updatePurchaseMetadata,
 } from '../services/firestoreOperations';
 import type { Brand, Purchase, PurchaseBrand, PurchasePaymentMethod } from '../types';
@@ -27,9 +30,13 @@ export function PurchasesPage({
   externalOpenNew?: boolean;
   onClearExternalNew?: () => void;
 }) {
-  const { user, settings, products, purchases } = useAppData();
+  const { user, settings, products, purchases, stockLots, stockMovements, payables } = useAppData();
 
   const [showNewModal, setShowNewModal] = useState(false);
+  const [editingPurchase, setEditingPurchase] = useState<Purchase | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Purchase | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [selectedPurchase, setSelectedPurchase] = useState<Purchase | null>(null);
   const [editBillingDate, setEditBillingDate] = useState('');
   const [editNotes, setEditNotes] = useState('');
@@ -62,8 +69,65 @@ export function PurchasesPage({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  const resetFormToNew = () => {
+    setEditingPurchase(null);
+    setBrand('Avon');
+    setOrderNumber('');
+    setPurchaseDate(getTodayISO());
+    setBillingDate('');
+    setReferenceDate(getTodayISO());
+    setPaymentMethod('BOLETO_2X');
+    setOverrideOriginalTotal('');
+    setNotes('');
+    setItems([
+      {
+        name: '',
+        code: '',
+        brand: 'Avon',
+        category: settings?.categories?.[0] || 'Perfumaria',
+        quantity: 1,
+        unitOriginalCost: 0,
+        qtyForClients: 0,
+        qtyForStock: 1,
+      },
+    ]);
+    setErrorMsg(null);
+  };
+
+  const openEditPurchase = (p: Purchase) => {
+    setEditingPurchase(p);
+    setBrand(p.brand);
+    setOrderNumber(p.orderNumber);
+    setPurchaseDate(p.purchaseDate);
+    setBillingDate(p.billingDate || '');
+    setReferenceDate(p.referenceDate || p.purchaseDate);
+    setPaymentMethod(p.paymentMethod);
+    const itemsOrigSum = p.items.reduce((acc, it) => acc + it.quantity * it.unitOriginalCost, 0);
+    setOverrideOriginalTotal(
+      Math.abs(itemsOrigSum - p.originalTotal) > 0.02 ? p.originalTotal.toFixed(2) : ''
+    );
+    setNotes(p.notes || '');
+    setItems(
+      p.items.map((it) => ({
+        productId: it.productId,
+        name: it.name,
+        code: it.code,
+        brand: it.brand,
+        category: it.category,
+        quantity: it.quantity,
+        unitOriginalCost: it.unitOriginalCost,
+        qtyForClients: it.qtyForClients,
+        qtyForStock: it.qtyForStock,
+      }))
+    );
+    setErrorMsg(null);
+    setSelectedPurchase(null);
+    setShowNewModal(true);
+  };
+
   React.useEffect(() => {
     if (externalOpenNew) {
+      resetFormToNew();
       setShowNewModal(true);
       onClearExternalNew?.();
     }
@@ -166,6 +230,16 @@ export function PurchasesPage({
     });
   };
 
+  const editEligibility = useMemo(() => {
+    if (!editingPurchase) return { allowed: true };
+    return canFullEditOrDeletePurchase(editingPurchase, stockLots, payables);
+  }, [editingPurchase, stockLots, payables]);
+
+  const deleteEligibility = useMemo(() => {
+    if (!deleteTarget) return { allowed: true };
+    return canFullEditOrDeletePurchase(deleteTarget, stockLots, payables);
+  }, [deleteTarget, stockLots, payables]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !settings) return;
@@ -174,46 +248,58 @@ export function PurchasesPage({
     setSubmitting(true);
 
     try {
-      await registerPurchase(
-        user.uid,
-        {
-          brand,
-          orderNumber,
-          purchaseDate,
-          billingDate,
-          referenceDate,
-          paymentMethod,
-          overrideOriginalTotal:
-            overrideOriginalTotal.trim() !== '' ? Number(overrideOriginalTotal) : undefined,
-          notes,
-          items,
-        },
-        settings,
-        products
-      );
+      const payload = {
+        brand,
+        orderNumber,
+        purchaseDate,
+        billingDate,
+        referenceDate,
+        paymentMethod,
+        overrideOriginalTotal:
+          overrideOriginalTotal.trim() !== '' ? Number(overrideOriginalTotal) : undefined,
+        notes,
+        items,
+      };
 
-      setSuccessMsg(`Pedido ${orderNumber} registrado e integrado ao estoque e financeiro.`);
-      setOrderNumber('');
-      setBillingDate('');
-      setOverrideOriginalTotal('');
-      setNotes('');
-      setItems([
-        {
-          name: '',
-          code: '',
-          brand: brand === 'Natura' ? 'Natura' : 'Avon',
-          category: categories[0] || 'Outros',
-          quantity: 1,
-          unitOriginalCost: 0,
-          qtyForClients: 0,
-          qtyForStock: 1,
-        },
-      ]);
+      if (editingPurchase) {
+        await updatePurchase(
+          user.uid,
+          editingPurchase,
+          payload,
+          settings,
+          products,
+          stockLots,
+          stockMovements,
+          payables
+        );
+        setSuccessMsg(`Pedido ${orderNumber} atualizado com sucesso.`);
+      } else {
+        await registerPurchase(user.uid, payload, settings, products);
+        setSuccessMsg(`Pedido ${orderNumber} registrado e integrado ao estoque e financeiro.`);
+      }
+
+      resetFormToNew();
       setShowNewModal(false);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Erro ao registrar compra.');
+      setErrorMsg(err instanceof Error ? err.message : 'Erro ao salvar compra.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteError(null);
+    setDeleting(true);
+    try {
+      await deletePurchase(deleteTarget, products, stockLots, stockMovements, payables);
+      setSuccessMsg(`Pedido ${deleteTarget.orderNumber} excluído com sucesso.`);
+      setDeleteTarget(null);
+      setSelectedPurchase(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Erro ao excluir pedido.');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -263,7 +349,7 @@ export function PurchasesPage({
         <button
           type="button"
           onClick={() => {
-            setErrorMsg(null);
+            resetFormToNew();
             setShowNewModal(true);
           }}
           className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-emerald-500"
@@ -297,18 +383,40 @@ export function PurchasesPage({
                         {formatDateBR(p.purchaseDate)} · {p.brand} · {p.itemsCount} item(ns)
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedPurchase(p);
-                        setEditBillingDate(p.billingDate || '');
-                        setEditNotes(p.notes || '');
-                      }}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
-                    >
-                      <Eye className="h-3.5 w-3.5" />
-                      Ver
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedPurchase(p);
+                          setEditBillingDate(p.billingDate || '');
+                          setEditNotes(p.notes || '');
+                        }}
+                        aria-label="Ver pedido"
+                        className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950/60 px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        Ver
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openEditPurchase(p)}
+                        aria-label="Editar pedido"
+                        className="inline-flex items-center justify-center rounded-lg border border-zinc-700 bg-zinc-950/60 p-1.5 text-zinc-200 hover:bg-zinc-800"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteError(null);
+                          setDeleteTarget(p);
+                        }}
+                        aria-label="Excluir pedido"
+                        className="inline-flex items-center justify-center rounded-lg border border-red-900/50 bg-red-950/30 p-1.5 text-red-400 hover:bg-red-950/60"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-3 gap-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2.5 text-[11px]">
@@ -353,7 +461,7 @@ export function PurchasesPage({
                     <th className="px-4 py-3 text-right font-medium">Original</th>
                     <th className="px-4 py-3 text-right font-medium">Acréscimo</th>
                     <th className="px-4 py-3 text-right font-medium">Total Efetivo</th>
-                    <th className="px-4 py-3 text-right font-medium">Detalhes</th>
+                    <th className="px-4 py-3 text-right font-medium">Ações</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/70">
@@ -383,18 +491,41 @@ export function PurchasesPage({
                         {formatCurrency(p.effectiveTotal)}
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedPurchase(p);
-                            setEditBillingDate(p.billingDate || '');
-                            setEditNotes(p.notes || '');
-                          }}
-                          className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-950/60 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                          Ver
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedPurchase(p);
+                              setEditBillingDate(p.billingDate || '');
+                              setEditNotes(p.notes || '');
+                            }}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-950/60 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            Ver
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openEditPurchase(p)}
+                            title="Editar pedido"
+                            aria-label="Editar pedido"
+                            className="inline-flex items-center justify-center rounded-md border border-zinc-700 bg-zinc-950/60 p-1.5 text-zinc-200 hover:bg-zinc-800"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeleteError(null);
+                              setDeleteTarget(p);
+                            }}
+                            title="Excluir pedido"
+                            aria-label="Excluir pedido"
+                            className="inline-flex items-center justify-center rounded-md border border-red-900/50 bg-red-950/30 p-1.5 text-red-400 hover:bg-red-950/60"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -405,12 +536,23 @@ export function PurchasesPage({
         )}
       </div>
 
-      {/* New Purchase Modal */}
+      {/* New / Edit Purchase Modal */}
       <Modal
         open={showNewModal}
-        onClose={() => setShowNewModal(false)}
-        title="Registrar Entrada de Compra"
-        subtitle="Cadastre pedidos Avon, Natura ou mistos com rateio automático do custo financeiro e criação de lotes FIFO."
+        onClose={() => {
+          setShowNewModal(false);
+          setEditingPurchase(null);
+        }}
+        title={
+          editingPurchase
+            ? `Editar Pedido #${editingPurchase.orderNumber}`
+            : 'Registrar Entrada de Compra'
+        }
+        subtitle={
+          editingPurchase
+            ? 'Altere os dados do pedido. O estoque FIFO e o financeiro serão recalculados automaticamente.'
+            : 'Cadastre pedidos Avon, Natura ou mistos com rateio automático do custo financeiro e criação de lotes FIFO.'
+        }
         maxWidth="4xl"
       >
         <form onSubmit={handleSubmit} className="space-y-5">
@@ -420,13 +562,20 @@ export function PurchasesPage({
             </div>
           )}
 
+          {editingPurchase && !editEligibility.allowed && (
+            <div className="rounded-lg border border-amber-800/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
+              {editEligibility.reason} Por segurança, apenas Número do Pedido, Data de Faturamento e Observações podem ser alterados.
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
               <label className="block text-xs font-medium text-zinc-300">Marca do Pedido</label>
               <select
                 value={brand}
+                disabled={Boolean(editingPurchase && !editEligibility.allowed)}
                 onChange={(e) => handleBrandChange(e.target.value as PurchaseBrand)}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               >
                 <option value="Avon">Avon</option>
                 <option value="Natura">Natura</option>
@@ -450,8 +599,9 @@ export function PurchasesPage({
               <label className="block text-xs font-medium text-zinc-300">Forma de Pagamento</label>
               <select
                 value={paymentMethod}
+                disabled={Boolean(editingPurchase && !editEligibility.allowed)}
                 onChange={(e) => setPaymentMethod(e.target.value as PurchasePaymentMethod)}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               >
                 <option value="A_VISTA">À vista (sem acréscimo)</option>
                 <option value="BOLETO_2X">
@@ -465,6 +615,7 @@ export function PurchasesPage({
               <input
                 type="date"
                 required
+                disabled={Boolean(editingPurchase && !editEligibility.allowed)}
                 value={purchaseDate}
                 onChange={(e) => {
                   setPurchaseDate(e.target.value);
@@ -472,7 +623,7 @@ export function PurchasesPage({
                     setReferenceDate(e.target.value);
                   }
                 }}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               />
             </div>
 
@@ -495,9 +646,10 @@ export function PurchasesPage({
               <input
                 type="date"
                 required
+                disabled={Boolean(editingPurchase && !editEligibility.allowed)}
                 value={referenceDate}
                 onChange={(e) => setReferenceDate(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none disabled:opacity-50"
               />
             </div>
           </div>
@@ -510,8 +662,9 @@ export function PurchasesPage({
               </h3>
               <button
                 type="button"
+                disabled={Boolean(editingPurchase && !editEligibility.allowed)}
                 onClick={addItemRow}
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700"
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
               >
                 <Plus className="h-3.5 w-3.5" />
                 Adicionar Produto
@@ -521,6 +674,7 @@ export function PurchasesPage({
             <div className="space-y-3">
               {items.map((item, idx) => {
                 const calcItem = liveCalc.items[idx];
+                const isLocked = Boolean(editingPurchase && !editEligibility.allowed);
                 return (
                   <div
                     key={idx}
@@ -534,8 +688,9 @@ export function PurchasesPage({
                           </label>
                           <select
                             value={item.productId || ''}
+                            disabled={isLocked}
                             onChange={(e) => handleSelectExistingProduct(idx, e.target.value)}
-                            className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
+                            className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
                           >
                             <option value="">Novo produto...</option>
                             {products.map((pr) => (
@@ -554,10 +709,11 @@ export function PurchasesPage({
                         <input
                           type="text"
                           required
+                          disabled={isLocked}
                           value={item.name}
                           onChange={(e) => updateItemRow(idx, { name: e.target.value })}
                           placeholder="Ex.: Kaiak Clássico 100ml"
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500"
+                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 disabled:opacity-50"
                         />
                       </div>
 
@@ -565,10 +721,11 @@ export function PurchasesPage({
                         <label className="block text-[11px] font-medium text-zinc-400">Código</label>
                         <input
                           type="text"
+                          disabled={isLocked}
                           value={item.code}
                           onChange={(e) => updateItemRow(idx, { code: e.target.value })}
                           placeholder="Opcional"
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500"
+                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 disabled:opacity-50"
                         />
                       </div>
 
@@ -576,9 +733,9 @@ export function PurchasesPage({
                         <label className="block text-[11px] font-medium text-zinc-400">Marca</label>
                         <select
                           value={item.brand}
-                          disabled={brand !== 'Mista'}
+                          disabled={isLocked || brand !== 'Mista'}
                           onChange={(e) => updateItemRow(idx, { brand: e.target.value as Brand })}
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 disabled:bg-zinc-950 disabled:text-zinc-500"
+                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 disabled:bg-zinc-950 disabled:text-zinc-500 disabled:opacity-50"
                         >
                           <option value="Avon">Avon</option>
                           <option value="Natura">Natura</option>
@@ -589,7 +746,7 @@ export function PurchasesPage({
                         <button
                           type="button"
                           onClick={() => removeItemRow(idx)}
-                          disabled={items.length === 1}
+                          disabled={isLocked || items.length === 1}
                           aria-label="Remover item"
                           className="rounded p-1.5 text-zinc-500 hover:bg-red-950/60 hover:text-red-400 disabled:opacity-30"
                         >
@@ -605,8 +762,9 @@ export function PurchasesPage({
                         </label>
                         <select
                           value={item.category}
+                          disabled={isLocked}
                           onChange={(e) => updateItemRow(idx, { category: e.target.value })}
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
+                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
                         >
                           {categories.map((cat) => (
                             <option key={cat} value={cat}>
@@ -622,9 +780,10 @@ export function PurchasesPage({
                           type="number"
                           min={1}
                           required
+                          disabled={isLocked}
                           value={item.quantity}
                           onChange={(e) => updateItemRow(idx, { quantity: Number(e.target.value) })}
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
                         />
                       </div>
 
@@ -637,11 +796,12 @@ export function PurchasesPage({
                           min={0}
                           step="0.01"
                           required
+                          disabled={isLocked}
                           value={item.unitOriginalCost}
                           onChange={(e) =>
                             updateItemRow(idx, { unitOriginalCost: Number(e.target.value) })
                           }
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
                         />
                       </div>
 
@@ -653,11 +813,12 @@ export function PurchasesPage({
                           type="number"
                           min={0}
                           max={item.quantity}
+                          disabled={isLocked}
                           value={item.qtyForClients}
                           onChange={(e) =>
                             updateItemRow(idx, { qtyForClients: Number(e.target.value) })
                           }
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
                         />
                       </div>
 
@@ -669,11 +830,12 @@ export function PurchasesPage({
                           type="number"
                           min={0}
                           max={item.quantity}
+                          disabled={isLocked}
                           value={item.qtyForStock}
                           onChange={(e) =>
                             updateItemRow(idx, { qtyForStock: Number(e.target.value) })
                           }
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
                         />
                       </div>
 
@@ -703,10 +865,11 @@ export function PurchasesPage({
                 type="number"
                 min={0}
                 step="0.01"
+                disabled={Boolean(editingPurchase && !editEligibility.allowed)}
                 value={overrideOriginalTotal}
                 onChange={(e) => setOverrideOriginalTotal(e.target.value)}
                 placeholder={liveCalc.originalTotal.toFixed(2)}
-                className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500"
+                className="font-mono-num mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 disabled:opacity-50"
               />
             </div>
             <div className="sm:col-span-2">
@@ -772,7 +935,10 @@ export function PurchasesPage({
           <div className="flex justify-end gap-2 border-t border-zinc-800 pt-4">
             <button
               type="button"
-              onClick={() => setShowNewModal(false)}
+              onClick={() => {
+                setShowNewModal(false);
+                setEditingPurchase(null);
+              }}
               className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-700"
             >
               Cancelar
@@ -782,7 +948,11 @@ export function PurchasesPage({
               disabled={submitting}
               className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-60"
             >
-              {submitting ? 'Registrando...' : 'Confirmar Entrada da Compra'}
+              {submitting
+                ? 'Salvando...'
+                : editingPurchase
+                  ? 'Salvar Alterações do Pedido'
+                  : 'Confirmar Entrada da Compra'}
             </button>
           </div>
         </form>
@@ -903,21 +1073,104 @@ export function PurchasesPage({
               </div>
             </div>
 
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => openEditPurchase(selectedPurchase)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  Editar Pedido
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeleteError(null);
+                    setDeleteTarget(selectedPurchase);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-950/60"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Excluir
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedPurchase(null)}
+                  className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700"
+                >
+                  Fechar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSavePurchaseMeta}
+                  className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                >
+                  Salvar Atualização
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Delete Purchase Confirmation Modal */}
+      <Modal
+        open={Boolean(deleteTarget)}
+        onClose={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+        title={`Excluir Pedido #${deleteTarget?.orderNumber ?? ''}`}
+        subtitle="Confirme a remoção deste pedido de compra."
+        maxWidth="md"
+      >
+        {deleteTarget && (
+          <div className="space-y-4 text-xs">
+            {!deleteEligibility.allowed ? (
+              <div className="rounded-lg border border-amber-800/60 bg-amber-950/40 p-3 text-amber-200">
+                <p className="font-semibold">Não é possível excluir este pedido</p>
+                <p className="mt-1">{deleteEligibility.reason}</p>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-zinc-200">
+                <p>
+                  Tem certeza que deseja excluir o pedido{' '}
+                  <strong>#{deleteTarget.orderNumber}</strong> ({deleteTarget.brand} ·{' '}
+                  {formatCurrency(deleteTarget.effectiveTotal)})?
+                </p>
+                <p className="mt-1.5 text-zinc-400">
+                  Os lotes adicionados no estoque e os boletos/contas a pagar vinculados a este pedido também serão removidos.
+                </p>
+              </div>
+            )}
+
+            {deleteError && (
+              <div className="rounded-lg border border-red-900/60 bg-red-950/50 px-3 py-2 text-red-300">
+                {deleteError}
+              </div>
+            )}
+
             <div className="flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setSelectedPurchase(null)}
-                className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-700"
               >
-                Fechar
+                Cancelar
               </button>
-              <button
-                type="button"
-                onClick={handleSavePurchaseMeta}
-                className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-              >
-                Salvar Atualização
-              </button>
+              {deleteEligibility.allowed && (
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={handleConfirmDelete}
+                  className="rounded-lg bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-60"
+                >
+                  {deleting ? 'Excluindo...' : 'Confirmar Exclusão'}
+                </button>
+              )}
             </div>
           </div>
         )}
