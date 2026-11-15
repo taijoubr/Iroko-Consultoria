@@ -20,6 +20,7 @@ import {
   formatDateBR,
   formatPercent,
   getTodayISO,
+  round2,
   translatePaymentMethod,
 } from '../utils/formatters';
 
@@ -52,24 +53,43 @@ export function PurchasesPage({
   const [paymentMethod, setPaymentMethod] = useState<PurchasePaymentMethod>('BOLETO_2X');
   const [overrideOriginalTotal, setOverrideOriginalTotal] = useState<string>('');
   const [notes, setNotes] = useState('');
-  const [items, setItems] = useState<PurchaseDraftItem[]>([
-    {
-      name: '',
-      code: '',
-      brand: 'Avon',
-      category: 'Perfumaria',
-      quantity: 1,
-      unitOriginalCost: 0,
-      qtyForClients: 0,
-      qtyForStock: 1,
-    },
-  ]);
+  const [items, setItems] = useState<PurchaseDraftItem[]>([]);
+  const [draftItem, setDraftItem] = useState<PurchaseDraftItem>({
+    name: '',
+    code: '',
+    brand: 'Avon',
+    category: 'Perfumaria',
+    quantity: 1,
+    unitOriginalCost: 0,
+    qtyForClients: 0,
+    qtyForStock: 1,
+  });
+  const [draftUnitCostText, setDraftUnitCostText] = useState('');
+  const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
+  const productNameInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  const categories = settings?.categories?.length ? settings.categories : DEFAULT_CATEGORIES;
+
+  const createEmptyDraft = (
+    targetBrand: PurchaseBrand = brand,
+    preferredCategory?: string
+  ): PurchaseDraftItem => ({
+    name: '',
+    code: '',
+    brand: targetBrand === 'Natura' ? 'Natura' : 'Avon',
+    category: preferredCategory || categories[0] || 'Perfumaria',
+    quantity: 1,
+    unitOriginalCost: 0,
+    qtyForClients: 0,
+    qtyForStock: 1,
+  });
+
   const resetFormToNew = () => {
+    const initialCat = settings?.categories?.[0] || 'Perfumaria';
     setEditingPurchase(null);
     setBrand('Avon');
     setOrderNumber('');
@@ -79,18 +99,10 @@ export function PurchasesPage({
     setPaymentMethod('BOLETO_2X');
     setOverrideOriginalTotal('');
     setNotes('');
-    setItems([
-      {
-        name: '',
-        code: '',
-        brand: 'Avon',
-        category: settings?.categories?.[0] || 'Perfumaria',
-        quantity: 1,
-        unitOriginalCost: 0,
-        qtyForClients: 0,
-        qtyForStock: 1,
-      },
-    ]);
+    setItems([]);
+    setDraftItem(createEmptyDraft('Avon', initialCat));
+    setDraftUnitCostText('');
+    setEditingItemIndex(null);
     setErrorMsg(null);
   };
 
@@ -120,6 +132,9 @@ export function PurchasesPage({
         qtyForStock: it.qtyForStock,
       }))
     );
+    setDraftItem(createEmptyDraft(p.brand, p.items[0]?.category || categories[0] || 'Perfumaria'));
+    setDraftUnitCostText('');
+    setEditingItemIndex(null);
     setErrorMsg(null);
     setSelectedPurchase(null);
     setShowNewModal(true);
@@ -133,13 +148,17 @@ export function PurchasesPage({
     }
   }, [externalOpenNew, onClearExternalNew]);
 
-  const categories = settings?.categories?.length ? settings.categories : DEFAULT_CATEGORIES;
+  const effectiveItemsForPreview = useMemo(() => {
+    if (items.length > 0) return items;
+    if (draftItem.name.trim()) return [draftItem];
+    return [];
+  }, [items, draftItem]);
 
   const liveCalc = useMemo(() => {
     const parsedOverride =
       overrideOriginalTotal.trim() !== '' ? Number(overrideOriginalTotal) : undefined;
     return calculatePurchaseFinancials(
-      items,
+      effectiveItemsForPreview,
       paymentMethod,
       settings?.boletoSurchargePercent ?? 5,
       referenceDate || purchaseDate,
@@ -147,7 +166,14 @@ export function PurchasesPage({
       settings?.boletoInstallment2Days ?? 45,
       parsedOverride
     );
-  }, [items, paymentMethod, settings, referenceDate, purchaseDate, overrideOriginalTotal]);
+  }, [
+    effectiveItemsForPreview,
+    paymentMethod,
+    settings,
+    referenceDate,
+    purchaseDate,
+    overrideOriginalTotal,
+  ]);
 
   const filteredPurchases = useMemo(() => {
     return purchases
@@ -170,64 +196,104 @@ export function PurchasesPage({
     setBrand(newBrand);
     if (newBrand === 'Avon' || newBrand === 'Natura') {
       setItems((prev) => prev.map((it) => ({ ...it, brand: newBrand })));
+      setDraftItem((prev) => ({ ...prev, brand: newBrand }));
     }
   };
 
-  const addItemRow = () => {
-    const defaultItemBrand: Brand = brand === 'Natura' ? 'Natura' : 'Avon';
-    setItems((prev) => [
-      ...prev,
-      {
-        name: '',
-        code: '',
-        brand: defaultItemBrand,
-        category: categories[0] || 'Outros',
-        quantity: 1,
-        unitOriginalCost: 0,
-        qtyForClients: 0,
-        qtyForStock: 1,
-      },
-    ]);
+  const updateDraftItem = (patch: Partial<PurchaseDraftItem>) => {
+    setDraftItem((prev) => {
+      const next = { ...prev, ...patch };
+      if (patch.quantity !== undefined) {
+        const qty = Math.max(1, Math.floor(patch.quantity));
+        next.quantity = qty;
+        next.qtyForClients = Math.min(next.qtyForClients, qty);
+        next.qtyForStock = qty - next.qtyForClients;
+      } else if (patch.qtyForClients !== undefined) {
+        const cli = Math.max(0, Math.min(next.quantity, Math.floor(patch.qtyForClients)));
+        next.qtyForClients = cli;
+        next.qtyForStock = next.quantity - cli;
+      } else if (patch.qtyForStock !== undefined) {
+        const stk = Math.max(0, Math.min(next.quantity, Math.floor(patch.qtyForStock)));
+        next.qtyForStock = stk;
+        next.qtyForClients = next.quantity - stk;
+      }
+      return next;
+    });
   };
 
-  const removeItemRow = (index: number) => {
-    setItems((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== index) : prev));
-  };
-
-  const updateItemRow = (index: number, patch: Partial<PurchaseDraftItem>) => {
-    setItems((prev) =>
-      prev.map((item, i) => {
-        if (i !== index) return item;
-        const next = { ...item, ...patch };
-        if (patch.quantity !== undefined) {
-          const qty = Math.max(1, Math.floor(patch.quantity));
-          next.quantity = qty;
-          next.qtyForClients = Math.min(next.qtyForClients, qty);
-          next.qtyForStock = qty - next.qtyForClients;
-        } else if (patch.qtyForClients !== undefined) {
-          const cli = Math.max(0, Math.min(next.quantity, Math.floor(patch.qtyForClients)));
-          next.qtyForClients = cli;
-          next.qtyForStock = next.quantity - cli;
-        } else if (patch.qtyForStock !== undefined) {
-          const stk = Math.max(0, Math.min(next.quantity, Math.floor(patch.qtyForStock)));
-          next.qtyForStock = stk;
-          next.qtyForClients = next.quantity - stk;
-        }
-        return next;
-      })
-    );
-  };
-
-  const handleSelectExistingProduct = (index: number, productId: string) => {
+  const handleSelectExistingProduct = (productId: string) => {
+    if (!productId) {
+      updateDraftItem({ productId: undefined });
+      return;
+    }
     const found = products.find((p) => p.id === productId);
     if (!found) return;
-    updateItemRow(index, {
+    updateDraftItem({
       productId: found.id,
       name: found.name,
       code: found.code,
-      brand: found.brand,
+      brand: brand === 'Mista' ? found.brand : brand === 'Natura' ? 'Natura' : 'Avon',
       category: found.category,
     });
+  };
+
+  const handleSaveDraftItem = () => {
+    setErrorMsg(null);
+    if (!draftItem.name.trim()) {
+      setErrorMsg('Informe o nome do produto antes de adicionar à lista.');
+      productNameInputRef.current?.focus();
+      return;
+    }
+    if (draftItem.quantity <= 0) {
+      setErrorMsg('A quantidade deve ser maior que zero.');
+      return;
+    }
+
+    const normalizedItem: PurchaseDraftItem = {
+      ...draftItem,
+      name: draftItem.name.trim(),
+      code: draftItem.code.trim(),
+      brand: brand === 'Mista' ? draftItem.brand : brand === 'Natura' ? 'Natura' : 'Avon',
+      unitOriginalCost: Math.max(0, Number(draftItem.unitOriginalCost) || 0),
+    };
+
+    if (editingItemIndex !== null) {
+      setItems((prev) => prev.map((it, i) => (i === editingItemIndex ? normalizedItem : it)));
+      setEditingItemIndex(null);
+    } else {
+      setItems((prev) => [...prev, normalizedItem]);
+    }
+
+    // Keep the last selected category for fast sequential entry of products in the same line
+    setDraftItem(createEmptyDraft(brand, normalizedItem.category));
+    setDraftUnitCostText('');
+    setTimeout(() => productNameInputRef.current?.focus(), 0);
+  };
+
+  const handleEditAddedItem = (index: number) => {
+    const target = items[index];
+    if (!target) return;
+    setEditingItemIndex(index);
+    setDraftItem({ ...target });
+    setDraftUnitCostText(target.unitOriginalCost > 0 ? String(target.unitOriginalCost) : '');
+    setErrorMsg(null);
+    setTimeout(() => productNameInputRef.current?.focus(), 0);
+  };
+
+  const handleCancelEditDraftItem = () => {
+    setEditingItemIndex(null);
+    setDraftItem(createEmptyDraft(brand, draftItem.category));
+    setDraftUnitCostText('');
+    setErrorMsg(null);
+  };
+
+  const removeItemRow = (index: number) => {
+    setItems((prev) => prev.filter((_, i) => i !== index));
+    if (editingItemIndex === index) {
+      handleCancelEditDraftItem();
+    } else if (editingItemIndex !== null && index < editingItemIndex) {
+      setEditingItemIndex(editingItemIndex - 1);
+    }
   };
 
   const editEligibility = useMemo(() => {
@@ -245,6 +311,39 @@ export function PurchasesPage({
     if (!user || !settings) return;
     setErrorMsg(null);
     setSuccessMsg(null);
+
+    if (editingItemIndex !== null) {
+      setErrorMsg('Salve ou cancele a edição do produto em andamento antes de confirmar o pedido.');
+      return;
+    }
+
+    if (items.length > 0 && draftItem.name.trim()) {
+      setErrorMsg(
+        `Você preencheu "${draftItem.name.trim()}" acima, mas ainda não clicou em "Adicionar à Lista". Adicione-o à lista ou limpe o campo antes de confirmar.`
+      );
+      return;
+    }
+
+    const itemsToSubmit: PurchaseDraftItem[] =
+      items.length > 0
+        ? items
+        : draftItem.name.trim()
+          ? [
+              {
+                ...draftItem,
+                name: draftItem.name.trim(),
+                code: draftItem.code.trim(),
+                brand: brand === 'Mista' ? draftItem.brand : brand === 'Natura' ? 'Natura' : 'Avon',
+                unitOriginalCost: Math.max(0, Number(draftItem.unitOriginalCost) || 0),
+              },
+            ]
+          : [];
+
+    if (itemsToSubmit.length === 0) {
+      setErrorMsg('Adicione pelo menos um produto à lista do pedido.');
+      return;
+    }
+
     setSubmitting(true);
 
     try {
@@ -258,7 +357,7 @@ export function PurchasesPage({
         overrideOriginalTotal:
           overrideOriginalTotal.trim() !== '' ? Number(overrideOriginalTotal) : undefined,
         notes,
-        items,
+        items: itemsToSubmit,
       };
 
       if (editingPurchase) {
@@ -654,32 +753,37 @@ export function PurchasesPage({
             </div>
           </div>
 
-          {/* Items Editor */}
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h3 className="font-display text-xs font-semibold text-zinc-200">
-                Produtos Adquiridos ({items.length})
-              </h3>
-              <button
-                type="button"
-                disabled={Boolean(editingPurchase && !editEligibility.allowed)}
-                onClick={addItemRow}
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Adicionar Produto
-              </button>
-            </div>
+          {/* Fixed Single-Item Composer + Compact Added Items List */}
+          {(() => {
+            const isLocked = Boolean(editingPurchase && !editEligibility.allowed);
+            const handleDraftKeyDown = (e: React.KeyboardEvent) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                if (!isLocked) handleSaveDraftItem();
+              }
+            };
+            const draftSubtotal = round2(
+              (Number(draftItem.unitOriginalCost) || 0) * (Number(draftItem.quantity) || 0)
+            );
 
-            <div className="space-y-3">
-              {items.map((item, idx) => {
-                const calcItem = liveCalc.items[idx];
-                const isLocked = Boolean(editingPurchase && !editEligibility.allowed);
-                return (
-                  <div
-                    key={idx}
-                    className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 space-y-2.5"
-                  >
+            return (
+              <div className="space-y-3">
+                {!isLocked && (
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="font-display text-xs font-semibold text-zinc-100">
+                        {editingItemIndex !== null
+                          ? `Editando Produto #${editingItemIndex + 1} da Lista`
+                          : 'Adicionar Produto à Lista'}
+                      </h3>
+                      <span className="text-[11px] text-zinc-400">
+                        Subtotal:{' '}
+                        <strong className="font-mono-num text-zinc-200">
+                          {formatCurrency(draftSubtotal)}
+                        </strong>
+                      </span>
+                    </div>
+
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
                       {products.length > 0 && (
                         <div className="sm:col-span-3">
@@ -687,10 +791,9 @@ export function PurchasesPage({
                             Reutilizar Cadastro
                           </label>
                           <select
-                            value={item.productId || ''}
-                            disabled={isLocked}
-                            onChange={(e) => handleSelectExistingProduct(idx, e.target.value)}
-                            className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
+                            value={draftItem.productId || ''}
+                            onChange={(e) => handleSelectExistingProduct(e.target.value)}
+                            className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
                           >
                             <option value="">Novo produto...</option>
                             {products.map((pr) => (
@@ -702,18 +805,18 @@ export function PurchasesPage({
                         </div>
                       )}
 
-                      <div className={products.length > 0 ? 'sm:col-span-4' : 'sm:col-span-5'}>
+                      <div className={products.length > 0 ? 'sm:col-span-5' : 'sm:col-span-6'}>
                         <label className="block text-[11px] font-medium text-zinc-400">
                           Nome do Produto *
                         </label>
                         <input
+                          ref={productNameInputRef}
                           type="text"
-                          required
-                          disabled={isLocked}
-                          value={item.name}
-                          onChange={(e) => updateItemRow(idx, { name: e.target.value })}
+                          value={draftItem.name}
+                          onChange={(e) => updateDraftItem({ name: e.target.value })}
+                          onKeyDown={handleDraftKeyDown}
                           placeholder="Ex.: Kaiak Clássico 100ml"
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 disabled:opacity-50"
+                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
 
@@ -721,50 +824,37 @@ export function PurchasesPage({
                         <label className="block text-[11px] font-medium text-zinc-400">Código</label>
                         <input
                           type="text"
-                          disabled={isLocked}
-                          value={item.code}
-                          onChange={(e) => updateItemRow(idx, { code: e.target.value })}
+                          value={draftItem.code}
+                          onChange={(e) => updateDraftItem({ code: e.target.value })}
+                          onKeyDown={handleDraftKeyDown}
                           placeholder="Opcional"
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 disabled:opacity-50"
+                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
 
-                      <div className="sm:col-span-2">
+                      <div className={products.length > 0 ? 'sm:col-span-2' : 'sm:col-span-4'}>
                         <label className="block text-[11px] font-medium text-zinc-400">Marca</label>
                         <select
-                          value={item.brand}
-                          disabled={isLocked || brand !== 'Mista'}
-                          onChange={(e) => updateItemRow(idx, { brand: e.target.value as Brand })}
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 disabled:bg-zinc-950 disabled:text-zinc-500 disabled:opacity-50"
+                          value={draftItem.brand}
+                          disabled={brand !== 'Mista'}
+                          onChange={(e) => updateDraftItem({ brand: e.target.value as Brand })}
+                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 disabled:bg-zinc-950 disabled:text-zinc-500 disabled:opacity-70"
                         >
                           <option value="Avon">Avon</option>
                           <option value="Natura">Natura</option>
                         </select>
                       </div>
-
-                      <div className="flex items-end justify-end sm:col-span-1">
-                        <button
-                          type="button"
-                          onClick={() => removeItemRow(idx)}
-                          disabled={isLocked || items.length === 1}
-                          aria-label="Remover item"
-                          className="rounded p-1.5 text-zinc-500 hover:bg-red-950/60 hover:text-red-400 disabled:opacity-30"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-6">
-                      <div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-12 sm:items-end">
+                      <div className="col-span-2 sm:col-span-3">
                         <label className="block text-[11px] font-medium text-zinc-400">
                           Categoria
                         </label>
                         <select
-                          value={item.category}
-                          disabled={isLocked}
-                          onChange={(e) => updateItemRow(idx, { category: e.target.value })}
-                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
+                          value={draftItem.category}
+                          onChange={(e) => updateDraftItem({ category: e.target.value })}
+                          className="mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
                         >
                           {categories.map((cat) => (
                             <option key={cat} value={cat}>
@@ -774,86 +864,268 @@ export function PurchasesPage({
                         </select>
                       </div>
 
-                      <div>
+                      <div className="sm:col-span-2">
                         <label className="block text-[11px] font-medium text-zinc-400">Qtd.</label>
                         <input
                           type="number"
                           min={1}
-                          required
-                          disabled={isLocked}
-                          value={item.quantity}
-                          onChange={(e) => updateItemRow(idx, { quantity: Number(e.target.value) })}
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
+                          value={draftItem.quantity}
+                          onChange={(e) => updateDraftItem({ quantity: Number(e.target.value) })}
+                          onKeyDown={handleDraftKeyDown}
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
 
-                      <div>
+                      <div className="sm:col-span-2">
                         <label className="block text-[11px] font-medium text-zinc-400">
-                          Custo Unit. Original (R$)
+                          Custo Unit. (R$)
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={draftUnitCostText}
+                          onChange={(e) => {
+                            const raw = e.target.value.replace(/[^0-9.,]/g, '');
+                            setDraftUnitCostText(raw);
+                            const parsed = Number(raw.replace(',', '.'));
+                            updateDraftItem({
+                              unitOriginalCost: Number.isFinite(parsed) ? parsed : 0,
+                            });
+                          }}
+                          onKeyDown={handleDraftKeyDown}
+                          placeholder="0,00"
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-1">
+                        <label className="block text-[11px] font-medium text-zinc-400" title="Quantidade reservada para encomendas de clientes">
+                          Cli.
                         </label>
                         <input
                           type="number"
                           min={0}
-                          step="0.01"
-                          required
-                          disabled={isLocked}
-                          value={item.unitOriginalCost}
+                          max={draftItem.quantity}
+                          value={draftItem.qtyForClients}
                           onChange={(e) =>
-                            updateItemRow(idx, { unitOriginalCost: Number(e.target.value) })
+                            updateDraftItem({ qtyForClients: Number(e.target.value) })
                           }
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
+                          onKeyDown={handleDraftKeyDown}
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
 
-                      <div>
-                        <label className="block text-[11px] font-medium text-zinc-400">
-                          Qtd. Clientes
+                      <div className="sm:col-span-1">
+                        <label className="block text-[11px] font-medium text-zinc-400" title="Quantidade disponível para estoque">
+                          Est.
                         </label>
                         <input
                           type="number"
                           min={0}
-                          max={item.quantity}
-                          disabled={isLocked}
-                          value={item.qtyForClients}
+                          max={draftItem.quantity}
+                          value={draftItem.qtyForStock}
                           onChange={(e) =>
-                            updateItemRow(idx, { qtyForClients: Number(e.target.value) })
+                            updateDraftItem({ qtyForStock: Number(e.target.value) })
                           }
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
+                          onKeyDown={handleDraftKeyDown}
+                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
 
-                      <div>
-                        <label className="block text-[11px] font-medium text-zinc-400">
-                          Qtd. Estoque
-                        </label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={item.quantity}
-                          disabled={isLocked}
-                          value={item.qtyForStock}
-                          onChange={(e) =>
-                            updateItemRow(idx, { qtyForStock: Number(e.target.value) })
-                          }
-                          className="font-mono-num mt-0.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
-                        />
-                      </div>
-
-                      <div className="flex flex-col justify-end text-right">
-                        <span className="text-[11px] text-zinc-400">Custo Efetivo Unit.</span>
-                        <span className="font-mono-num text-xs font-semibold text-emerald-400">
-                          {formatCurrency(calcItem?.unitEffectiveCost ?? 0)}
-                        </span>
-                        <span className="font-mono-num text-[10px] text-zinc-500">
-                          Rateio: +{formatCurrency(calcItem?.allocatedFinancialCost ?? 0)}
-                        </span>
+                      <div className="col-span-2 flex gap-1.5 sm:col-span-3">
+                        {editingItemIndex !== null && (
+                          <button
+                            type="button"
+                            onClick={handleCancelEditDraftItem}
+                            className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+                          >
+                            Cancelar
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleSaveDraftItem}
+                          className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          {editingItemIndex !== null ? 'Atualizar Item' : 'Adicionar à Lista'}
+                        </button>
                       </div>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
+                )}
+
+                {/* Added Items Compact List */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-display text-xs font-semibold text-zinc-200">
+                      Lista de Produtos Adicionados ({items.length})
+                    </h3>
+                    {items.length > 0 && (
+                      <span className="font-mono-num text-[11px] text-zinc-400">
+                        {items.reduce((acc, it) => acc + it.quantity, 0)} un. no total
+                      </span>
+                    )}
+                  </div>
+
+                  {items.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/40 px-4 py-4 text-center text-xs text-zinc-500">
+                      Nenhum produto na lista ainda. Preencha acima e clique em{' '}
+                      <strong className="text-zinc-300">Adicionar à Lista</strong> (ou aperte Enter).
+                    </div>
+                  ) : (
+                    <>
+                      {/* Mobile Compact List */}
+                      <div className="space-y-2 sm:hidden">
+                        {items.map((item, idx) => {
+                          const calcItem = liveCalc.items[idx];
+                          const isBeingEdited = editingItemIndex === idx;
+                          return (
+                            <div
+                              key={idx}
+                              className={`rounded-lg border p-2.5 text-xs ${
+                                isBeingEdited
+                                  ? 'border-emerald-600/80 bg-emerald-950/25'
+                                  : 'border-zinc-800 bg-zinc-950/60'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <p className="truncate font-medium text-zinc-100">
+                                    {item.quantity}x {item.name}
+                                  </p>
+                                  <p className="text-[11px] text-zinc-400">
+                                    {item.brand} · {item.category}
+                                    {item.code ? ` · Cód. ${item.code}` : ''}
+                                  </p>
+                                  <p className="font-mono-num mt-1 text-[11px] text-zinc-300">
+                                    Orig.: {formatCurrency(item.unitOriginalCost)} · Efetivo:{' '}
+                                    <strong className="text-emerald-400">
+                                      {formatCurrency(calcItem?.unitEffectiveCost ?? item.unitOriginalCost)}
+                                    </strong>{' '}
+                                    · Est: {item.qtyForStock} / Cli: {item.qtyForClients}
+                                  </p>
+                                </div>
+                                {!isLocked && (
+                                  <div className="flex shrink-0 items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleEditAddedItem(idx)}
+                                      aria-label="Editar item"
+                                      className="rounded border border-zinc-700 bg-zinc-900 p-1.5 text-zinc-300 hover:bg-zinc-800"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => removeItemRow(idx)}
+                                      aria-label="Remover item"
+                                      className="rounded border border-zinc-700 bg-zinc-900 p-1.5 text-zinc-400 hover:border-red-900/60 hover:bg-red-950/40 hover:text-red-400"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Desktop Compact Table */}
+                      <div className="hidden overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950/60 sm:block">
+                        <table className="w-full text-left text-xs">
+                          <thead className="border-b border-zinc-800 bg-zinc-950 text-[11px] text-zinc-400">
+                            <tr>
+                              <th className="px-3 py-2 font-medium">Produto</th>
+                              <th className="px-3 py-2 font-medium">Categoria</th>
+                              <th className="px-3 py-2 text-right font-medium">Qtd (Est/Cli)</th>
+                              <th className="px-3 py-2 text-right font-medium">Orig. Unit.</th>
+                              <th className="px-3 py-2 text-right font-medium">Efetivo Unit.</th>
+                              {!isLocked && (
+                                <th className="px-3 py-2 text-right font-medium">Ações</th>
+                              )}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-800/70">
+                            {items.map((item, idx) => {
+                              const calcItem = liveCalc.items[idx];
+                              const isBeingEdited = editingItemIndex === idx;
+                              return (
+                                <tr
+                                  key={idx}
+                                  className={
+                                    isBeingEdited ? 'bg-emerald-950/25' : 'hover:bg-zinc-900/60'
+                                  }
+                                >
+                                  <td className="px-3 py-2">
+                                    <p className="font-medium text-zinc-100">{item.name}</p>
+                                    <p className="text-[11px] text-zinc-400">
+                                      {item.brand}
+                                      {item.code ? ` · Cód. ${item.code}` : ''}
+                                    </p>
+                                  </td>
+                                  <td className="px-3 py-2 text-zinc-300">{item.category}</td>
+                                  <td className="font-mono-num px-3 py-2 text-right text-zinc-200">
+                                    <strong>{item.quantity}</strong>{' '}
+                                    <span className="text-[10px] text-zinc-500">
+                                      ({item.qtyForStock}/{item.qtyForClients})
+                                    </span>
+                                  </td>
+                                  <td className="font-mono-num px-3 py-2 text-right text-zinc-300">
+                                    {formatCurrency(item.unitOriginalCost)}
+                                  </td>
+                                  <td className="font-mono-num px-3 py-2 text-right">
+                                    <span className="font-semibold text-emerald-400">
+                                      {formatCurrency(calcItem?.unitEffectiveCost ?? item.unitOriginalCost)}
+                                    </span>
+                                    <span className="block text-[10px] text-zinc-500">
+                                      +{formatCurrency(calcItem?.allocatedFinancialCost ?? 0)}
+                                    </span>
+                                  </td>
+                                  {!isLocked && (
+                                    <td className="px-3 py-2 text-right">
+                                      <div className="inline-flex items-center gap-1">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleEditAddedItem(idx)}
+                                          aria-label="Editar item"
+                                          title="Carregar para editar"
+                                          className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                                        >
+                                          <Pencil className="h-3.5 w-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => removeItemRow(idx)}
+                                          aria-label="Remover item"
+                                          title="Remover da lista"
+                                          className="rounded p-1 text-zinc-500 hover:bg-red-950/60 hover:text-red-400"
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  )}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+
+                  {!isLocked && items.length > 0 && draftItem.name.trim() && editingItemIndex === null && (
+                    <p className="text-[11px] text-amber-400">
+                      Você digitou &ldquo;{draftItem.name.trim()}&rdquo; acima. Clique em{' '}
+                      <strong>Adicionar à Lista</strong> para incluí-lo neste pedido.
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Override original total + Notes */}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
